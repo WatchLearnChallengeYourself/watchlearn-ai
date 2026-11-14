@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -51,6 +52,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -89,6 +91,7 @@ class MainActivity : ComponentActivity() {
         var showAutomationDialog by remember { mutableStateOf(false) }
         var apiKey by rememberSaveable { mutableStateOf("") }
         var connectedProvider by rememberSaveable { mutableStateOf("") }
+        var apiBaseUrl by rememberSaveable { mutableStateOf("https://api.openai.com/v1") }
         var selectedModel by rememberSaveable { mutableStateOf(DEFAULT_OPENAI_MODELS.first()) }
         var availableModels by remember { mutableStateOf(DEFAULT_OPENAI_MODELS) }
         var isRefreshingModels by remember { mutableStateOf(false) }
@@ -142,7 +145,7 @@ class MainActivity : ComponentActivity() {
             taskOutput = ""
             scope.launch {
                 try {
-                    taskOutput = requestTaskPlan(apiKey, selectedModel, trimmed)
+                    taskOutput = requestTaskPlan(apiKey, apiBaseUrl, selectedModel, trimmed)
                     taskStatus = "Task completed with $selectedModel."
                 } catch (error: Exception) {
                     taskStatus = "Task could not run."
@@ -160,7 +163,7 @@ class MainActivity : ComponentActivity() {
             taskStatus = "Loading models available to this API key..."
             scope.launch {
                 try {
-                    val models = requestOpenAiModels(apiKey)
+                    val models = requestApiModels(apiKey, apiBaseUrl)
                     if (models.isNotEmpty()) {
                         availableModels = models
                         if (selectedModel !in models) selectedModel = models.first()
@@ -182,6 +185,7 @@ class MainActivity : ComponentActivity() {
                     .fillMaxSize()
                     .verticalScroll(scrollState)
                     .padding(padding)
+                    .safeDrawingPadding()
             ) {
                 Text(
                     "WatchLearn AI",
@@ -241,6 +245,7 @@ class MainActivity : ComponentActivity() {
                     )
                     else -> SettingsScreen(
                         connectedProvider = connectedProvider,
+                        apiBaseUrl = apiBaseUrl,
                         deploymentMode = deploymentMode,
                         onAddKey = { showKeyDialog = true },
                         onModeSelected = {
@@ -288,8 +293,9 @@ class MainActivity : ComponentActivity() {
         if (showKeyDialog) {
             ApiKeyDialog(
                 onDismiss = { showKeyDialog = false },
-                onSave = { provider, key ->
+                onSave = { provider, baseUrl, key ->
                     connectedProvider = provider
+                    apiBaseUrl = baseUrl
                     apiKey = key
                     showKeyDialog = false
                     taskStatus = provider + " API key connected for this session."
@@ -351,7 +357,7 @@ private fun ChatScreen(
             }
         }
         Text(
-            "Run task now calls the selected OpenAI API model. Device-control actions still require Android accessibility to be enabled and an approved action executor.",
+            "Plan task and Run task now use the selected model, API key, and base URL. Device-control actions still require Android accessibility and an approved action executor.",
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -407,16 +413,32 @@ private fun ModelsScreen(
     onSelect: (String) -> Unit,
     onRefresh: () -> Unit
 ) {
+    var manualModel by rememberSaveable { mutableStateOf("") }
     Column(
         Modifier.padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("OpenAI API models", style = MaterialTheme.typography.titleLarge)
+        Text("API models", style = MaterialTheme.typography.titleLarge)
         Text(
-            "The refresh button loads every model returned by the connected API key. The list below is a starter catalog for offline selection."
+            "Refresh loads every model returned by the connected provider. You can also enter any model ID supported by your API endpoint."
         )
-        Button(onClick = onRefresh, enabled = !isRefreshing) {
-            Text(if (isRefreshing) "Refreshing…" else "Refresh models from OpenAI")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = onRefresh, enabled = !isRefreshing) {
+                Text(if (isRefreshing) "Refreshing…" else "Refresh models")
+            }
+        }
+        OutlinedTextField(
+            value = manualModel,
+            onValueChange = { manualModel = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Enter any model ID") },
+            singleLine = true
+        )
+        Button(
+            onClick = { onSelect(manualModel.trim()) },
+            enabled = manualModel.isNotBlank()
+        ) {
+            Text("Use model ID")
         }
         models.forEach { model ->
             FilterChip(
@@ -431,6 +453,7 @@ private fun ModelsScreen(
 @Composable
 private fun SettingsScreen(
     connectedProvider: String,
+    apiBaseUrl: String,
     deploymentMode: String,
     onAddKey: () -> Unit,
     onModeSelected: (String) -> Unit,
@@ -448,6 +471,7 @@ private fun SettingsScreen(
                 "Connected provider: $connectedProvider (key held in memory only)"
             }
         )
+        Text("API base URL: $apiBaseUrl")
         Text("Current mode: $deploymentMode")
         Text(
             "For personal sideload testing, the key is used only for the current app session and is not written to Android preferences. A production customer app should send keys to an authenticated encrypted backend."
@@ -468,9 +492,10 @@ private fun SettingsScreen(
 @Composable
 private fun ApiKeyDialog(
     onDismiss: () -> Unit,
-    onSave: (String, String) -> Unit
+    onSave: (String, String, String) -> Unit
 ) {
     var provider by rememberSaveable { mutableStateOf("OpenAI") }
+    var baseUrl by rememberSaveable { mutableStateOf("https://api.openai.com/v1") }
     var key by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -484,19 +509,26 @@ private fun ApiKeyDialog(
                     singleLine = true
                 )
                 OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = { Text("API base URL") },
+                    supportingText = { Text("Example: https://api.openai.com/v1") },
+                    singleLine = true
+                )
+                OutlinedTextField(
                     value = key,
                     onValueChange = { key = it },
                     label = { Text("API key") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true
                 )
-                Text("The key stays in memory for this personal sideload session and is sent only over HTTPS.")
+                Text("Use an OpenAI-compatible provider. The key stays in memory for this personal sideload session and is sent only over HTTPS.")
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onSave(provider.trim(), key.trim()) },
-                enabled = provider.isNotBlank() && key.isNotBlank()
+                onClick = { onSave(provider.trim(), baseUrl.trim().trimEnd('/'), key.trim()) },
+                enabled = provider.isNotBlank() && baseUrl.isNotBlank() && key.isNotBlank()
             ) { Text("Connect") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
@@ -539,9 +571,9 @@ private fun CreateAutomationDialog(
     )
 }
 
-private suspend fun requestOpenAiModels(apiKey: String): List<String> =
+private suspend fun requestApiModels(apiKey: String, baseUrl: String): List<String> =
     withContext(Dispatchers.IO) {
-        val connection = (URL("https://api.openai.com/v1/models").openConnection() as HttpURLConnection)
+        val connection = (URL(apiEndpoint(baseUrl, "/models")).openConnection() as HttpURLConnection)
         try {
             connection.requestMethod = "GET"
             connection.connectTimeout = 15_000
@@ -549,18 +581,15 @@ private suspend fun requestOpenAiModels(apiKey: String): List<String> =
             connection.setRequestProperty("Authorization", "Bearer " + apiKey)
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val body = stream.bufferedReader().use { it.readText() }
-            if (code !in 200..299) {
-                throw IOException("OpenAI models request failed ($code): " + body.take(240))
-            }
+            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) throw IOException(friendlyApiError(code, body))
             val data = JSONObject(body).optJSONArray("data") ?: return@withContext emptyList()
-            val models = buildList {
+            buildList {
                 for (index in 0 until data.length()) {
                     val id = data.optJSONObject(index)?.optString("id").orEmpty()
-                    if (id.startsWith("gpt-") || id.startsWith("o")) add(id)
+                    if (id.isNotBlank()) add(id)
                 }
-            }
-            models.distinct().sorted()
+            }.distinct().sorted()
         } finally {
             connection.disconnect()
         }
@@ -568,19 +597,26 @@ private suspend fun requestOpenAiModels(apiKey: String): List<String> =
 
 private suspend fun requestTaskPlan(
     apiKey: String,
+    baseUrl: String,
     model: String,
     description: String
 ): String = withContext(Dispatchers.IO) {
-    val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection)
+    val connection = (URL(apiEndpoint(baseUrl, "/chat/completions")).openConnection() as HttpURLConnection)
     try {
+        val messages = JSONArray()
+            .put(
+                JSONObject()
+                    .put("role", "system")
+                    .put(
+                        "content",
+                        "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
+                            "Do not claim you performed actions. Identify every step that needs user permission."
+                    )
+            )
+            .put(JSONObject().put("role", "user").put("content", description))
         val payload = JSONObject()
             .put("model", model)
-            .put(
-                "input",
-                "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
-                    "Do not claim you performed actions. Identify any step that needs user permission. Task: " +
-                    description
-            )
+            .put("messages", messages)
         connection.requestMethod = "POST"
         connection.doOutput = true
         connection.connectTimeout = 15_000
@@ -590,27 +626,34 @@ private suspend fun requestTaskPlan(
         connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
         val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val body = stream.bufferedReader().use { it.readText() }
-        if (code !in 200..299) {
-            throw IOException("OpenAI task request failed ($code): " + body.take(320))
-        }
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) throw IOException(friendlyApiError(code, body))
+
         val json = JSONObject(body)
-        val directText = json.optString("output_text")
-        if (directText.isNotBlank()) return@withContext directText
-        val output = json.optJSONArray("output") ?: return@withContext body
-        val parts = buildList {
-            for (index in 0 until output.length()) {
-                val item = output.optJSONObject(index) ?: continue
-                val content = item.optJSONArray("content") ?: continue
-                for (contentIndex in 0 until content.length()) {
-                    val text = content.optJSONObject(contentIndex)?.optString("text").orEmpty()
-                    if (text.isNotBlank()) add(text)
-                }
-            }
+        val choices = json.optJSONArray("choices")
+        val message = choices?.optJSONObject(0)?.optJSONObject("message")
+        val content = message?.opt("content")
+        when (content) {
+            is String -> content
+            null -> json.optString("output_text").ifBlank { body }
+            else -> content.toString()
         }
-        parts.joinToString("\n").ifBlank { body }
     } finally {
         connection.disconnect()
     }
+}
+
+private fun apiEndpoint(baseUrl: String, suffix: String): String =
+    baseUrl.trim().trimEnd('/') + suffix
+
+private fun friendlyApiError(code: Int, body: String): String {
+    val lower = body.lowercase()
+    if (code == 429 && (lower.contains("credit_balance_exhausted") || lower.contains("insufficient_quota") || lower.contains("no credits"))) {
+        return "This API key has no remaining credits. Add credits to that provider or connect a different API key."
+    }
+    val message = runCatching {
+        JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
+    }.getOrDefault("")
+    return "API request failed ($code): " + message.ifBlank { body.take(320) }
 }
 
