@@ -118,8 +118,8 @@ private val REASONING_MODE_OPTIONS = listOf("Standard", "Pro")
 private const val DEVICE_ACTION_INSTRUCTIONS = """
 Return only valid JSON with this exact shape:
 {"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
-Allowed action types are launch_app, tap_text, tap_view_id, tap, type_text, swipe, back, home, recents, notifications, and wait.
-Use launch_app with an app name when the user asks to open an app. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
+Allowed action types are launch_app, open_url, tap_text, tap_view_id, tap, type_text, swipe, back, home, recents, notifications, and wait.
+Use launch_app with an app name when the user asks to open an app. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
 Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
 """
