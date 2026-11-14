@@ -25,6 +25,7 @@ import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.RSAPublicKeySpec
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 
 data class ChatGptPlanSession(
     val accessToken: String,
@@ -72,9 +73,14 @@ class ChatGptPlanAuth(private val context: Context) {
         )
         val state = randomToken(32)
         val nonce = randomToken(32)
-        val hostId = preferences.getString(KEY_HOST_ID, null) ?: randomToken(24).also {
-            preferences.edit().putString(KEY_HOST_ID, it).apply()
-        }
+        // OpenAI expects ext_agent_host_id to be a stable, opaque host
+        // identifier.  Use a URN UUID so installs created by older builds
+        // with a raw Base64 value are migrated automatically.
+        val hostId = preferences.getString(KEY_HOST_ID, null)
+            ?.takeIf { it.startsWith("urn:uuid:") && it.length > "urn:uuid:".length }
+            ?: "urn:uuid:${UUID.randomUUID()}".also {
+                preferences.edit().putString(KEY_HOST_ID, it).apply()
+            }
         val savedClientId = preferences.getString(KEY_CLIENT_ID, null)
         val clientIdForAuthorization = savedClientId ?: "dynamic_agent_client"
 
