@@ -63,18 +63,44 @@ import java.net.URL
 import java.util.zip.ZipInputStream
 
 private val DEFAULT_OPENAI_MODELS = listOf(
+    // Current general-purpose/chat models shown by the OpenAI model catalog.
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.4-pro",
+    "gpt-5.4-mini",
+    "gpt-5.2",
+    "gpt-5.2-pro",
+    "gpt-5.3-codex",
+    // Older compatible IDs are retained for providers that still expose them.
     "gpt-5",
     "gpt-5-mini",
     "gpt-5-nano",
     "gpt-4.1",
     "gpt-4.1-mini",
-    "gpt-4.1-nano",
-    "gpt-4o",
     "gpt-4o-mini",
-    "o3",
-    "o3-mini",
-    "o4-mini"
+    "o3"
 )
+
+private fun modelDisplayName(modelId: String): String = modelId
+    .split('-')
+    .joinToString(" ") { part ->
+        when {
+            part.equals("gpt", ignoreCase = true) -> "GPT"
+            part.equals("codex", ignoreCase = true) -> "Codex"
+            part.equals("pro", ignoreCase = true) -> "Pro"
+            part.length == 1 -> part.uppercase()
+            else -> part.replaceFirstChar { it.uppercase() }
+        }
+    }
 
 private val REASONING_EFFORT_OPTIONS = listOf(
     "Auto",
@@ -228,20 +254,38 @@ class MainActivity : ComponentActivity() {
                 taskStatus = "Connect ChatGPT or an API key before refreshing models."
                 return
             }
+
+            // A Sign in with ChatGPT session is not an API organization key and
+            // may not be allowed to enumerate /v1/models. Keep the built-in
+            // catalog available instead of showing an empty model screen.
+            if (apiKey.isBlank() && chatGptSession != null) {
+                availableModels = DEFAULT_OPENAI_MODELS
+                if (selectedModel !in availableModels) selectedModel = availableModels.first()
+                taskStatus = "Loaded the built-in ChatGPT model catalog. Connect an API key to verify models enabled for your API organization."
+                return
+            }
+
             isRefreshingModels = true
             taskStatus = "Loading models available to the connected provider..."
             scope.launch {
                 try {
                     val models = requestApiModels(bearerToken, apiBaseUrl)
                     if (models.isNotEmpty()) {
-                        availableModels = models
-                        if (selectedModel !in models) selectedModel = models.first()
-                        taskStatus = "Loaded " + models.size + " models available to the connected provider."
+                        // Keep the catalog useful even when a provider's
+                        // /models endpoint returns only a partial list.
+                        availableModels = (DEFAULT_OPENAI_MODELS + models).distinct()
+                        if (selectedModel !in availableModels) selectedModel = models.first()
+                        taskStatus = "Loaded " + availableModels.size + " models, including the provider's returned models."
                     } else {
-                        taskStatus = "No chat-capable models were returned."
+                        availableModels = DEFAULT_OPENAI_MODELS
+                        if (selectedModel !in availableModels) selectedModel = availableModels.first()
+                        taskStatus = "The provider returned no model list, so the built-in ChatGPT model catalog is being used."
                     }
                 } catch (error: Exception) {
-                    taskStatus = error.message ?: "Could not load models."
+                    availableModels = DEFAULT_OPENAI_MODELS
+                    if (selectedModel !in availableModels) selectedModel = availableModels.first()
+                    taskStatus = "Model refresh unavailable; using the built-in catalog. " +
+                        (error.message ?: "Connect an API key with model-list access to verify availability.")
                 } finally {
                     isRefreshingModels = false
                 }
@@ -637,7 +681,7 @@ private fun ModelsScreen(
     ) {
         Text("API models", style = MaterialTheme.typography.titleLarge)
         Text(
-            "Refresh loads every model returned by the connected ChatGPT plan or API provider. You can also enter any model ID supported by your endpoint."
+            "The built-in catalog includes the current general-purpose chat models, including GPT-5.6 Luna. Refresh adds models returned by your API organization. A ChatGPT sign-in may not expose the API model-list endpoint, so it falls back to this catalog."
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = onRefresh, enabled = !isRefreshing) {
@@ -681,7 +725,7 @@ private fun ModelsScreen(
             FilterChip(
                 selected = selectedModel == model,
                 onClick = { onSelect(model) },
-                label = { Text(model) }
+                label = { Text(modelDisplayName(model)) }
             )
         }
     }
