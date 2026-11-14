@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">WatchLearn AI</string>
+    <string name="app_tagline">Watch. Learn. Challenge Yourself.</string>
+    <string name="recording_channel_name">WatchLearn screen recording</string>
+    <string name="stop_recording">Stop recording</string>
+    <string name="accessibility_service_description">Performs user-approved, clearly described actions in supported workflows. Enable this only if you understand what the service can inspect and do.</string>
+</resources>
