@@ -1,8 +1,10 @@
 package com.watchlearn.ai
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -29,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -54,8 +57,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.IOException
+import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.zip.ZipInputStream
 
 private val DEFAULT_OPENAI_MODELS = listOf(
     "gpt-5",
@@ -74,6 +79,11 @@ private val DEFAULT_OPENAI_MODELS = listOf(
 private data class Automation(
     val name: String,
     val instruction: String
+)
+
+private data class ImportedChat(
+    val title: String,
+    val transcript: String
 )
 
 class MainActivity : ComponentActivity() {
@@ -98,12 +108,31 @@ class MainActivity : ComponentActivity() {
         var taskStatus by rememberSaveable { mutableStateOf("Ready for a task.") }
         var taskOutput by rememberSaveable { mutableStateOf("") }
         var deploymentMode by rememberSaveable { mutableStateOf("Personal sideload mode") }
+        var importedChats by remember { mutableStateOf<List<ImportedChat>>(emptyList()) }
         val automations = remember { mutableStateListOf<Automation>() }
         val scope = rememberCoroutineScope()
         val scrollState = rememberScrollState()
         val notificationPermissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { }
+
+        val chatExportLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri == null) {
+                taskStatus = "ChatGPT export selection cancelled."
+            } else {
+                taskStatus = "Importing ChatGPT conversations..."
+                scope.launch {
+                    try {
+                        importedChats = importChatGPTExport(contentResolver, uri)
+                        taskStatus = "Imported " + importedChats.size + " ChatGPT conversations."
+                    } catch (error: Exception) {
+                        taskStatus = error.message ?: "Could not import ChatGPT export."
+                    }
+                }
+            }
+        }
 
         LaunchedEffect(Unit) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -179,6 +208,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        fun openOfficialChatGPT() {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com")))
+            taskStatus = "Opening official ChatGPT."
+        }
+
+        fun shareTaskToChatGPT(description: String) {
+            val trimmed = description.trim()
+            if (trimmed.isEmpty()) {
+                taskStatus = "Describe a task before sending it to ChatGPT."
+                return
+            }
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, trimmed)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Send task to ChatGPT"))
+            taskStatus = "Task ready to send to ChatGPT."
+        }
+
         Scaffold { padding ->
             Column(
                 Modifier
@@ -196,8 +244,8 @@ class MainActivity : ComponentActivity() {
                     "Watch. Learn. Challenge Yourself.",
                     modifier = Modifier.padding(horizontal = 20.dp)
                 )
-                TabRow(selectedTabIndex = tab) {
-                    listOf("Chat", "Automations", "Models", "Settings").forEachIndexed { index, label ->
+                ScrollableTabRow(selectedTabIndex = tab) {
+                    listOf("Chat", "Automations", "Models", "ChatGPT", "Settings").forEachIndexed { index, label ->
                         Tab(
                             selected = tab == index,
                             onClick = { tab = index },
@@ -212,6 +260,7 @@ class MainActivity : ComponentActivity() {
                         taskOutput = taskOutput,
                         onPlanTask = { runTask(it) },
                         onRunTask = { runTask(it) },
+                        onShareToChatGPT = { shareTaskToChatGPT(it) },
                         onRecord = { showRecordingConsent = true },
                         onStopRecording = {
                             startService(
@@ -242,6 +291,13 @@ class MainActivity : ComponentActivity() {
                             taskStatus = "Selected model: $it"
                         },
                         onRefresh = { refreshModels() }
+                    )
+                    3 -> ChatGPTScreen(
+                        chats = importedChats,
+                        onOpenChatGPT = { openOfficialChatGPT() },
+                        onImportExport = {
+                            chatExportLauncher.launch(arrayOf("application/zip", "application/json", "text/*", "*/*"))
+                        }
                     )
                     else -> SettingsScreen(
                         connectedProvider = connectedProvider,
@@ -322,6 +378,7 @@ private fun ChatScreen(
     taskOutput: String,
     onPlanTask: (String) -> Unit,
     onRunTask: (String) -> Unit,
+    onShareToChatGPT: (String) -> Unit,
     onRecord: () -> Unit,
     onStopRecording: () -> Unit,
     onAccessibility: () -> Unit
@@ -344,6 +401,9 @@ private fun ChatScreen(
             Button(onClick = { onPlanTask(command) }) { Text("Plan task") }
             Button(onClick = { onRunTask(command) }) { Text("Run task now") }
         }
+        OutlinedButton(onClick = { onShareToChatGPT(command) }) {
+            Text("Send task to ChatGPT")
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = onRecord) { Text("Record approved task") }
             OutlinedButton(onClick = onStopRecording) { Text("Stop recording") }
@@ -358,6 +418,63 @@ private fun ChatScreen(
         }
         Text(
             "Plan task and Run task now use the selected model, API key, and base URL. Device-control actions still require Android accessibility and an approved action executor.",
+            style = MaterialTheme.typography.bodySmall
+        )
+    }
+}
+
+@Composable
+private fun ChatGPTScreen(
+    chats: List<ImportedChat>,
+    onOpenChatGPT: () -> Unit,
+    onImportExport: () -> Unit
+) {
+    var search by rememberSaveable { mutableStateOf("") }
+    val filteredChats = chats.filter {
+        search.isBlank() ||
+            it.title.contains(search, ignoreCase = true) ||
+            it.transcript.contains(search, ignoreCase = true)
+    }
+    Column(
+        Modifier.padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("ChatGPT", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Use your ChatGPT subscription in the official ChatGPT app or website without putting an API key in WatchLearn AI."
+        )
+        Button(onClick = onOpenChatGPT) { Text("Open official ChatGPT") }
+        OutlinedButton(onClick = onImportExport) { Text("Import ChatGPT export") }
+        Text(
+            "To import chats, request Export data in ChatGPT Settings → Data controls, then choose the ZIP file here."
+        )
+        if (chats.isNotEmpty()) {
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Search imported chats") },
+                singleLine = true
+            )
+            Text("Imported chats: " + filteredChats.size)
+            filteredChats.forEach { chat ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(chat.title, style = MaterialTheme.typography.titleMedium)
+                        Text(chat.transcript.take(800))
+                    }
+                }
+            }
+        } else {
+            Card {
+                Text(
+                    "No exported chats imported yet.",
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+        Text(
+            "Sign in with ChatGPT does not give a third-party app automatic access to live ChatGPT conversations. This section uses the official ChatGPT launcher and your own data export instead.",
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -655,5 +772,66 @@ private fun friendlyApiError(code: Int, body: String): String {
         JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
     }.getOrDefault("")
     return "API request failed ($code): " + message.ifBlank { body.take(320) }
+}
+
+private suspend fun importChatGPTExport(
+    contentResolver: ContentResolver,
+    uri: Uri
+): List<ImportedChat> = withContext(Dispatchers.IO) {
+    val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        ?: throw IOException("Could not read the selected ChatGPT export.")
+    val jsonText = if (bytes.size >= 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()) {
+        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            var entry = zip.nextEntry
+            var conversations: ByteArray? = null
+            while (entry != null) {
+                if (!entry.isDirectory && entry.name.endsWith("conversations.json")) {
+                    conversations = zip.readBytes()
+                    break
+                }
+                entry = zip.nextEntry
+            }
+            conversations?.toString(Charsets.UTF_8)
+                ?: throw IOException("The export ZIP does not contain conversations.json.")
+        }
+    } else {
+        bytes.toString(Charsets.UTF_8)
+    }
+    parseChatGPTConversations(jsonText)
+}
+
+private fun parseChatGPTConversations(jsonText: String): List<ImportedChat> {
+    val conversations = JSONArray(jsonText)
+    return buildList {
+        for (index in 0 until conversations.length()) {
+            val conversation = conversations.optJSONObject(index) ?: continue
+            val title = conversation.optString("title").ifBlank { "Untitled Chat" }
+            val mapping = conversation.optJSONObject("mapping")
+            val transcript = if (mapping == null) {
+                ""
+            } else {
+                val messages = mutableListOf<String>()
+                var nodeId = conversation.optString("current_node")
+                while (nodeId.isNotBlank()) {
+                    val node = mapping.optJSONObject(nodeId) ?: break
+                    val message = node.optJSONObject("message")
+                    val content = message?.optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    if (parts != null) {
+                        val text = buildString {
+                            for (partIndex in 0 until parts.length()) {
+                                val part = parts.opt(partIndex)
+                                if (part is String) append(part).append("\n")
+                            }
+                        }.trim()
+                        if (text.isNotBlank()) messages.add(0, text)
+                    }
+                    nodeId = node.optString("parent")
+                }
+                messages.joinToString("\n\n")
+            }
+            add(ImportedChat(title, transcript.ifBlank { "No readable message text found." }))
+        }
+    }
 }
 
