@@ -3,5 +3,5 @@
     <string name="app_tagline">Watch. Learn. Challenge Yourself.</string>
     <string name="recording_channel_name">WatchLearn screen recording</string>
     <string name="stop_recording">Stop recording</string>
-    <string name="accessibility_service_description">Performs user-approved, clearly described actions in supported workflows. Enable this only if you understand what the service can inspect and do.</string>
+    <string name="accessibility_service_description">Lets WatchLearn AI inspect the active app and perform clearly described, user-approved actions such as opening launchable apps, tapping controls, typing, and swiping. Enable this only if you understand what the service can inspect and do.</string>
 </resources>
