@@ -76,6 +76,19 @@ private val DEFAULT_OPENAI_MODELS = listOf(
     "o4-mini"
 )
 
+private val REASONING_EFFORT_OPTIONS = listOf(
+    "Auto",
+    "None",
+    "Minimal",
+    "Low",
+    "Medium",
+    "High",
+    "XHigh",
+    "Max"
+)
+
+private val REASONING_MODE_OPTIONS = listOf("Standard", "Pro")
+
 private data class Automation(
     val name: String,
     val instruction: String
@@ -106,6 +119,8 @@ class MainActivity : ComponentActivity() {
         var isChatGptSigningIn by remember { mutableStateOf(false) }
         var selectedModel by rememberSaveable { mutableStateOf(DEFAULT_OPENAI_MODELS.first()) }
         var availableModels by remember { mutableStateOf(DEFAULT_OPENAI_MODELS) }
+        var selectedReasoningEffort by rememberSaveable { mutableStateOf("Auto") }
+        var selectedReasoningMode by rememberSaveable { mutableStateOf("Standard") }
         var isRefreshingModels by remember { mutableStateOf(false) }
         var taskStatus by rememberSaveable { mutableStateOf("Ready for a task.") }
         var taskOutput by rememberSaveable { mutableStateOf("") }
@@ -175,19 +190,31 @@ class MainActivity : ComponentActivity() {
             }
 
             taskStatus = if (chatGptSession != null) {
-                "Running task with your ChatGPT plan using $selectedModel..."
+                "Running task with your ChatGPT plan using $selectedModel ($selectedReasoningEffort)..."
             } else {
-                "Running task with $selectedModel..."
+                "Running task with $selectedModel ($selectedReasoningEffort)..."
             }
             taskOutput = ""
             scope.launch {
                 try {
                     taskOutput = if (chatGptSession != null) {
-                        requestChatGptPlan(chatGptSession!!.accessToken, selectedModel, trimmed)
+                        requestChatGptPlan(
+                            accessToken = chatGptSession!!.accessToken,
+                            model = selectedModel,
+                            description = trimmed,
+                            reasoningEffort = selectedReasoningEffort,
+                            reasoningMode = selectedReasoningMode
+                        )
                     } else {
-                        requestTaskPlan(apiKey, apiBaseUrl, selectedModel, trimmed)
+                        requestTaskPlan(
+                            apiKey = apiKey,
+                            baseUrl = apiBaseUrl,
+                            model = selectedModel,
+                            description = trimmed,
+                            reasoningEffort = selectedReasoningEffort
+                        )
                     }
-                    taskStatus = "Task completed with $selectedModel."
+                    taskStatus = "Task completed with $selectedModel ($selectedReasoningEffort)."
                 } catch (error: Exception) {
                     taskStatus = "Task could not run."
                     taskOutput = error.message ?: "OpenAI request failed."
@@ -196,19 +223,20 @@ class MainActivity : ComponentActivity() {
         }
 
         fun refreshModels() {
-            if (apiKey.isBlank()) {
-                taskStatus = "Connect an OpenAI API key before refreshing models."
+            val bearerToken = apiKey.ifBlank { chatGptSession?.accessToken.orEmpty() }
+            if (bearerToken.isBlank()) {
+                taskStatus = "Connect ChatGPT or an API key before refreshing models."
                 return
             }
             isRefreshingModels = true
-            taskStatus = "Loading models available to this API key..."
+            taskStatus = "Loading models available to the connected provider..."
             scope.launch {
                 try {
-                    val models = requestApiModels(apiKey, apiBaseUrl)
+                    val models = requestApiModels(bearerToken, apiBaseUrl)
                     if (models.isNotEmpty()) {
                         availableModels = models
                         if (selectedModel !in models) selectedModel = models.first()
-                        taskStatus = "Loaded " + models.size + " models available to this API key."
+                        taskStatus = "Loaded " + models.size + " models available to the connected provider."
                     } else {
                         taskStatus = "No chat-capable models were returned."
                     }
@@ -268,6 +296,7 @@ class MainActivity : ComponentActivity() {
                 when (tab) {
                     0 -> ChatScreen(
                         selectedModel = selectedModel,
+                        selectedReasoningEffort = selectedReasoningEffort,
                         taskStatus = taskStatus,
                         taskOutput = taskOutput,
                         onPlanTask = { runTask(it) },
@@ -297,10 +326,20 @@ class MainActivity : ComponentActivity() {
                     2 -> ModelsScreen(
                         models = availableModels,
                         selectedModel = selectedModel,
+                        selectedReasoningEffort = selectedReasoningEffort,
+                        selectedReasoningMode = selectedReasoningMode,
                         isRefreshing = isRefreshingModels,
                         onSelect = {
                             selectedModel = it
                             taskStatus = "Selected model: $it"
+                        },
+                        onReasoningEffortSelect = {
+                            selectedReasoningEffort = it
+                            taskStatus = "Selected reasoning effort: $it"
+                        },
+                        onReasoningModeSelect = {
+                            selectedReasoningMode = it
+                            taskStatus = "Selected reasoning mode: $it"
                         },
                         onRefresh = { refreshModels() }
                     )
@@ -409,6 +448,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ChatScreen(
     selectedModel: String,
+    selectedReasoningEffort: String,
     taskStatus: String,
     taskOutput: String,
     onPlanTask: (String) -> Unit,
@@ -424,7 +464,10 @@ private fun ChatScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Describe a task, choose a model, and run it immediately.")
-        Text("Selected model: $selectedModel", style = MaterialTheme.typography.labelLarge)
+        Text(
+            "Selected model: $selectedModel · Reasoning: $selectedReasoningEffort",
+            style = MaterialTheme.typography.labelLarge
+        )
         OutlinedTextField(
             value = command,
             onValueChange = { command = it },
@@ -579,8 +622,12 @@ private fun AutomationScreen(
 private fun ModelsScreen(
     models: List<String>,
     selectedModel: String,
+    selectedReasoningEffort: String,
+    selectedReasoningMode: String,
     isRefreshing: Boolean,
     onSelect: (String) -> Unit,
+    onReasoningEffortSelect: (String) -> Unit,
+    onReasoningModeSelect: (String) -> Unit,
     onRefresh: () -> Unit
 ) {
     var manualModel by rememberSaveable { mutableStateOf("") }
@@ -590,7 +637,7 @@ private fun ModelsScreen(
     ) {
         Text("API models", style = MaterialTheme.typography.titleLarge)
         Text(
-            "Refresh loads every model returned by the connected provider. You can also enter any model ID supported by your API endpoint."
+            "Refresh loads every model returned by the connected ChatGPT plan or API provider. You can also enter any model ID supported by your endpoint."
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = onRefresh, enabled = !isRefreshing) {
@@ -609,6 +656,26 @@ private fun ModelsScreen(
             enabled = manualModel.isNotBlank()
         ) {
             Text("Use model ID")
+        }
+        Text("Reasoning effort", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Auto lets the model choose. Some models support only a subset of these values; if a provider rejects a value, choose Auto or another supported level.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        REASONING_EFFORT_OPTIONS.forEach { effort ->
+            FilterChip(
+                selected = selectedReasoningEffort == effort,
+                onClick = { onReasoningEffortSelect(effort) },
+                label = { Text(effort) }
+            )
+        }
+        Text("Reasoning mode", style = MaterialTheme.typography.titleMedium)
+        REASONING_MODE_OPTIONS.forEach { mode ->
+            FilterChip(
+                selected = selectedReasoningMode == mode,
+                onClick = { onReasoningModeSelect(mode) },
+                label = { Text(mode) }
+            )
         }
         models.forEach { model ->
             FilterChip(
@@ -744,7 +811,9 @@ private fun CreateAutomationDialog(
 private suspend fun requestChatGptPlan(
     accessToken: String,
     model: String,
-    description: String
+    description: String,
+    reasoningEffort: String,
+    reasoningMode: String
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection)
     try {
@@ -761,6 +830,13 @@ private suspend fun requestChatGptPlan(
                     )
                 )
         )
+        val reasoning = JSONObject()
+        if (!reasoningEffort.equals("Auto", ignoreCase = true)) {
+            reasoning.put("effort", reasoningEffort.lowercase())
+        }
+        if (reasoningMode.equals("Pro", ignoreCase = true)) {
+            reasoning.put("mode", "pro")
+        }
         val payload = JSONObject()
             .put("model", model)
             .put("store", false)
@@ -771,6 +847,7 @@ private suspend fun requestChatGptPlan(
                     "Do not claim you performed actions. Identify every step that needs user permission."
             )
             .put("input", input)
+        if (reasoning.length() > 0) payload.put("reasoning", reasoning)
         connection.requestMethod = "POST"
         connection.doOutput = true
         connection.connectTimeout = 15_000
@@ -840,7 +917,8 @@ private suspend fun requestTaskPlan(
     apiKey: String,
     baseUrl: String,
     model: String,
-    description: String
+    description: String,
+    reasoningEffort: String
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL(apiEndpoint(baseUrl, "/chat/completions")).openConnection() as HttpURLConnection)
     try {
@@ -858,6 +936,9 @@ private suspend fun requestTaskPlan(
         val payload = JSONObject()
             .put("model", model)
             .put("messages", messages)
+        if (!reasoningEffort.equals("Auto", ignoreCase = true)) {
+            payload.put("reasoning_effort", reasoningEffort.lowercase())
+        }
         connection.requestMethod = "POST"
         connection.doOutput = true
         connection.connectTimeout = 15_000
