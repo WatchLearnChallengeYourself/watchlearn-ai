@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -20,7 +22,7 @@ android {
     ) {
         val signingFile = file("${project.buildDir}/watchlearn-release.jks")
         signingFile.parentFile.mkdirs()
-        signingFile.writeBytes(java.util.Base64.getDecoder().decode(signingKeystoreBase64))
+        signingFile.writeBytes(Base64.getDecoder().decode(signingKeystoreBase64))
         signingConfigs.create("watchlearnStable") {
             storeFile = signingFile
             storePassword = signingStorePassword
