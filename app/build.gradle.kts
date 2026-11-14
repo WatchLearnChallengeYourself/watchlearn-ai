@@ -8,17 +8,44 @@ android {
     namespace = "com.watchlearn.ai"
     compileSdk = 35
 
+    val signingKeystoreBase64 = System.getenv("WATCHLEARN_KEYSTORE_BASE64")
+    val signingStorePassword = System.getenv("WATCHLEARN_KEYSTORE_PASSWORD")
+    val signingKeyAlias = System.getenv("WATCHLEARN_KEY_ALIAS")
+    val signingKeyPassword = System.getenv("WATCHLEARN_KEY_PASSWORD")
+    val stableSigningConfig = if (
+        !signingKeystoreBase64.isNullOrBlank() &&
+        !signingStorePassword.isNullOrBlank() &&
+        !signingKeyAlias.isNullOrBlank() &&
+        !signingKeyPassword.isNullOrBlank()
+    ) {
+        val signingFile = file("${project.buildDir}/watchlearn-release.jks")
+        signingFile.parentFile.mkdirs()
+        signingFile.writeBytes(java.util.Base64.getDecoder().decode(signingKeystoreBase64))
+        signingConfigs.create("watchlearnStable") {
+            storeFile = signingFile
+            storePassword = signingStorePassword
+            keyAlias = signingKeyAlias
+            keyPassword = signingKeyPassword
+        }
+    } else {
+        null
+    }
+
     defaultConfig {
         applicationId = "com.watchlearn.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
+        debug {
+            stableSigningConfig?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
+            stableSigningConfig?.let { signingConfig = it }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
