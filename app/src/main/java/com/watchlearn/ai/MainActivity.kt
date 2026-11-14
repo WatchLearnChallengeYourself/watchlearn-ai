@@ -115,6 +115,15 @@ private val REASONING_EFFORT_OPTIONS = listOf(
 
 private val REASONING_MODE_OPTIONS = listOf("Standard", "Pro")
 
+private const val DEVICE_ACTION_INSTRUCTIONS = """
+Return only valid JSON with this exact shape:
+{"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
+Allowed action types are launch_app, tap_text, tap_view_id, tap, type_text, swipe, back, home, recents, notifications, and wait.
+Use launch_app with an app name when the user asks to open an app. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
+Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
+Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
+"""
+
 private data class Automation(
     val name: String,
     val instruction: String
@@ -150,6 +159,8 @@ class MainActivity : ComponentActivity() {
         var isRefreshingModels by remember { mutableStateOf(false) }
         var taskStatus by rememberSaveable { mutableStateOf("Ready for a task.") }
         var taskOutput by rememberSaveable { mutableStateOf("") }
+        var pendingDevicePlan by remember { mutableStateOf<DevicePlan?>(null) }
+        var showActionApproval by remember { mutableStateOf(false) }
         var deploymentMode by rememberSaveable { mutableStateOf("Personal sideload mode") }
         var importedChats by remember { mutableStateOf<List<ImportedChat>>(emptyList()) }
         val automations = remember { mutableStateListOf<Automation>() }
@@ -223,7 +234,7 @@ class MainActivity : ComponentActivity() {
             taskOutput = ""
             scope.launch {
                 try {
-                    taskOutput = if (chatGptSession != null) {
+                    val response = if (chatGptSession != null) {
                         requestChatGptPlan(
                             accessToken = chatGptSession!!.accessToken,
                             model = selectedModel,
@@ -240,7 +251,24 @@ class MainActivity : ComponentActivity() {
                             reasoningEffort = selectedReasoningEffort
                         )
                     }
-                    taskStatus = "Task completed with $selectedModel ($selectedReasoningEffort)."
+                    val devicePlan = parseDevicePlan(response)
+                    if (devicePlan != null) {
+                        taskOutput = formatDevicePlan(devicePlan)
+                        pendingDevicePlan = devicePlan.takeIf { it.actions.isNotEmpty() }
+                        if (pendingDevicePlan != null) {
+                            if (WatchLearnAccessibilityService.isReady()) {
+                                showActionApproval = true
+                                taskStatus = "Phone-control plan ready. Review and approve the proposed actions."
+                            } else {
+                                taskStatus = "Phone-control plan ready. Enable Android accessibility before approving it."
+                            }
+                        } else {
+                            taskStatus = "Plan completed with $selectedModel ($selectedReasoningEffort)."
+                        }
+                    } else {
+                        taskOutput = response
+                        taskStatus = "Plan completed with $selectedModel ($selectedReasoningEffort)."
+                    }
                 } catch (error: Exception) {
                     taskStatus = "Task could not run."
                     taskOutput = error.message ?: "OpenAI request failed."
@@ -486,6 +514,58 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+        if (showActionApproval) {
+            val plan = pendingDevicePlan
+            if (plan != null) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showActionApproval = false
+                        pendingDevicePlan = null
+                        taskStatus = "Phone-control actions were not approved."
+                    },
+                    title = { Text("Approve phone control?") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(plan.summary)
+                            plan.actions.forEachIndexed { index, action ->
+                                Text("${index + 1}. ${describeDeviceAction(action)}")
+                            }
+                            Text(
+                                "WatchLearn AI will perform these actions through Android Accessibility. Review them before continuing.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showActionApproval = false
+                            val started = WatchLearnAccessibilityService.executeApproved(plan.actions) { success, message ->
+                                taskStatus = if (success) {
+                                    message
+                                } else {
+                                    "Phone control stopped: $message"
+                                }
+                                if (!success) taskOutput = taskOutput + "\n\n" + message
+                                pendingDevicePlan = null
+                            }
+                            if (!started) {
+                                pendingDevicePlan = null
+                                taskStatus = "Android accessibility is not enabled. Enable it, then run the task again."
+                            } else {
+                                taskStatus = "Approved. Performing phone actions..."
+                            }
+                        }) { Text("Approve and run") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showActionApproval = false
+                            pendingDevicePlan = null
+                            taskStatus = "Phone-control actions were not approved."
+                        }) { Text("Cancel") }
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -539,7 +619,7 @@ private fun ChatScreen(
             }
         }
         Text(
-            "Plan task and Run task now use the selected model, API key, and base URL. Device-control actions still require Android accessibility and an approved action executor.",
+            "Run task now can propose phone actions such as opening an app, tapping visible controls, typing into the focused field, swiping, Back, Home, and Recents. Android accessibility must be enabled, and you must approve each proposed action plan.",
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -888,7 +968,8 @@ private suspend fun requestChatGptPlan(
             .put(
                 "instructions",
                 "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
-                    "Do not claim you performed actions. Identify every step that needs user permission."
+                    "Do not claim you performed actions. Identify every step that needs user permission.\n" +
+                    DEVICE_ACTION_INSTRUCTIONS
             )
             .put("input", input)
         if (reasoning.length() > 0) payload.put("reasoning", reasoning)
@@ -973,7 +1054,8 @@ private suspend fun requestTaskPlan(
                     .put(
                         "content",
                         "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
-                            "Do not claim you performed actions. Identify every step that needs user permission."
+                            "Do not claim you performed actions. Identify every step that needs user permission.\n" +
+                            DEVICE_ACTION_INSTRUCTIONS
                     )
             )
             .put(JSONObject().put("role", "user").put("content", description))
