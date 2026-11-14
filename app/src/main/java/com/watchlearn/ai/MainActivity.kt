@@ -102,6 +102,8 @@ class MainActivity : ComponentActivity() {
         var apiKey by rememberSaveable { mutableStateOf("") }
         var connectedProvider by rememberSaveable { mutableStateOf("") }
         var apiBaseUrl by rememberSaveable { mutableStateOf("https://api.openai.com/v1") }
+        var chatGptSession by remember { mutableStateOf<ChatGptPlanSession?>(null) }
+        var isChatGptSigningIn by remember { mutableStateOf(false) }
         var selectedModel by rememberSaveable { mutableStateOf(DEFAULT_OPENAI_MODELS.first()) }
         var availableModels by remember { mutableStateOf(DEFAULT_OPENAI_MODELS) }
         var isRefreshingModels by remember { mutableStateOf(false) }
@@ -111,6 +113,7 @@ class MainActivity : ComponentActivity() {
         var importedChats by remember { mutableStateOf<List<ImportedChat>>(emptyList()) }
         val automations = remember { mutableStateListOf<Automation>() }
         val scope = rememberCoroutineScope()
+        val chatGptAuth = remember { ChatGptPlanAuth(this@MainActivity) }
         val scrollState = rememberScrollState()
         val notificationPermissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -140,6 +143,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
+            chatGptSession = chatGptAuth.loadSession()
         }
 
         val projectionLauncher = rememberLauncherForActivityResult(
@@ -164,17 +168,25 @@ class MainActivity : ComponentActivity() {
                 taskOutput = ""
                 return
             }
-            if (apiKey.isBlank()) {
-                taskStatus = "Task saved, but an OpenAI API key is required to run it."
-                taskOutput = "Open Settings → Connect an API key, then run this task again."
+            if (apiKey.isBlank() && chatGptSession == null) {
+                taskStatus = "Connect ChatGPT or an API key before running this task."
+                taskOutput = "Open the ChatGPT tab and choose Continue with ChatGPT, or connect an API key in Settings."
                 return
             }
 
-            taskStatus = "Running task with $selectedModel..."
+            taskStatus = if (chatGptSession != null) {
+                "Running task with your ChatGPT plan using $selectedModel..."
+            } else {
+                "Running task with $selectedModel..."
+            }
             taskOutput = ""
             scope.launch {
                 try {
-                    taskOutput = requestTaskPlan(apiKey, apiBaseUrl, selectedModel, trimmed)
+                    taskOutput = if (chatGptSession != null) {
+                        requestChatGptPlan(chatGptSession!!.accessToken, selectedModel, trimmed)
+                    } else {
+                        requestTaskPlan(apiKey, apiBaseUrl, selectedModel, trimmed)
+                    }
                     taskStatus = "Task completed with $selectedModel."
                 } catch (error: Exception) {
                     taskStatus = "Task could not run."
@@ -294,6 +306,29 @@ class MainActivity : ComponentActivity() {
                     )
                     3 -> ChatGPTScreen(
                         chats = importedChats,
+                        connected = chatGptSession != null,
+                        isSigningIn = isChatGptSigningIn,
+                        onSignIn = {
+                            if (!isChatGptSigningIn) {
+                                isChatGptSigningIn = true
+                                taskStatus = "Opening secure ChatGPT sign-in..."
+                                scope.launch {
+                                    try {
+                                        chatGptSession = chatGptAuth.signIn()
+                                        taskStatus = "ChatGPT connected. Plan task can now use your ChatGPT allowance."
+                                    } catch (error: Exception) {
+                                        taskStatus = error.message ?: "ChatGPT sign-in failed."
+                                    } finally {
+                                        isChatGptSigningIn = false
+                                    }
+                                }
+                            }
+                        },
+                        onSignOut = {
+                            chatGptAuth.clear()
+                            chatGptSession = null
+                            taskStatus = "ChatGPT disconnected from WatchLearn AI."
+                        },
                         onOpenChatGPT = { openOfficialChatGPT() },
                         onImportExport = {
                             chatExportLauncher.launch(arrayOf("application/zip", "application/json", "text/*", "*/*"))
@@ -426,6 +461,10 @@ private fun ChatScreen(
 @Composable
 private fun ChatGPTScreen(
     chats: List<ImportedChat>,
+    connected: Boolean,
+    isSigningIn: Boolean,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit,
     onOpenChatGPT: () -> Unit,
     onImportExport: () -> Unit
 ) {
@@ -443,6 +482,20 @@ private fun ChatGPTScreen(
         Text(
             "Use your ChatGPT subscription in the official ChatGPT app or website without putting an API key in WatchLearn AI."
         )
+        Text(
+            if (connected) {
+                "ChatGPT plan connected. Plan task can use your authorized ChatGPT allowance."
+            } else {
+                "ChatGPT plan is not connected."
+            },
+            color = MaterialTheme.colorScheme.primary
+        )
+        Button(onClick = onSignIn, enabled = !connected && !isSigningIn) {
+            Text(if (isSigningIn) "Waiting for ChatGPT…" else "Continue with ChatGPT")
+        }
+        if (connected) {
+            OutlinedButton(onClick = onSignOut) { Text("Disconnect ChatGPT") }
+        }
         Button(onClick = onOpenChatGPT) { Text("Open official ChatGPT") }
         OutlinedButton(onClick = onImportExport) { Text("Import ChatGPT export") }
         Text(
@@ -474,7 +527,7 @@ private fun ChatGPTScreen(
             }
         }
         Text(
-            "Sign in with ChatGPT does not give a third-party app automatic access to live ChatGPT conversations. This section uses the official ChatGPT launcher and your own data export instead.",
+            "The connection can authorize plan requests, but it does not provide live ChatGPT conversation history. Use the export importer below for your chats.",
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -686,6 +739,77 @@ private fun CreateAutomationDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+}
+
+private suspend fun requestChatGptPlan(
+    accessToken: String,
+    model: String,
+    description: String
+): String = withContext(Dispatchers.IO) {
+    val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection)
+    try {
+        val input = JSONArray().put(
+            JSONObject()
+                .put("type", "message")
+                .put("role", "user")
+                .put(
+                    "content",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("type", "input_text")
+                            .put("text", description)
+                    )
+                )
+        )
+        val payload = JSONObject()
+            .put("model", model)
+            .put("store", false)
+            .put("stream", true)
+            .put(
+                "instructions",
+                "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
+                    "Do not claim you performed actions. Identify every step that needs user permission."
+            )
+            .put("input", input)
+        connection.requestMethod = "POST"
+        connection.doOutput = true
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 60_000
+        connection.setRequestProperty("Authorization", "Bearer " + accessToken)
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.setRequestProperty("Accept", "text/event-stream")
+        connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { reader ->
+            if (code !in 200..299) {
+                reader.readText()
+            } else {
+                val output = StringBuilder()
+                reader.forEachLine { line ->
+                    if (line.startsWith("data: ")) {
+                        val data = line.removePrefix("data: ").trim()
+                        if (data != "[DONE]" && data.isNotBlank()) {
+                            runCatching {
+                                val event = JSONObject(data)
+                                if (event.optString("type") == "response.output_text.delta") {
+                                    output.append(event.optString("delta"))
+                                }
+                                if (event.optString("type") == "response.failed") {
+                                    throw IOException(event.optJSONObject("error")?.optString("message"))
+                                }
+                            }.getOrThrow()
+                        }
+                    }
+                }
+                output.toString()
+            }
+        }.orEmpty()
+        if (code !in 200..299) throw IOException(friendlyApiError(code, body))
+        body.ifBlank { "ChatGPT returned no text." }
+    } finally {
+        connection.disconnect()
+    }
 }
 
 private suspend fun requestApiModels(apiKey: String, baseUrl: String): List<String> =
