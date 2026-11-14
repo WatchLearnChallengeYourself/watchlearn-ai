@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Path
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,6 +18,7 @@ data class DeviceAction(
     val type: String,
     val label: String = "",
     val text: String = "",
+    val url: String = "",
     val packageName: String = "",
     val viewId: String = "",
     val x: Float? = null,
@@ -48,6 +50,7 @@ fun parseDevicePlan(response: String): DevicePlan? {
                         type = type,
                         label = item.optString("label"),
                         text = item.optString("text", item.optString("value")),
+                        url = item.optString("url", item.optString("uri")),
                         packageName = item.optString("package", item.optString("app")),
                         viewId = item.optString("view_id", item.optString("viewId")),
                         x = item.optionalFloat("x"),
@@ -84,6 +87,7 @@ fun formatDevicePlan(plan: DevicePlan): String = buildString {
 
 fun describeDeviceAction(action: DeviceAction): String = when (action.type) {
     "launch_app", "open_app" -> "Open ${action.packageName.ifBlank { action.text.ifBlank { "the app" } }}"
+    "open_url" -> "Open ${action.url.ifBlank { action.text }}${action.packageName.takeIf { it.isNotBlank() }?.let { " in $it" } ?: ""}"
     "tap_text" -> "Tap “${action.text}”"
     "tap_view_id" -> "Tap view ${action.viewId}"
     "tap" -> "Tap screen at (${action.x ?: 0f}, ${action.y ?: 0f})"
@@ -134,7 +138,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             return
         }
         val delay = when (action.type) {
-            "launch_app", "open_app", "back", "home", "recents", "notifications" -> 1_000L
+            "launch_app", "open_app", "open_url", "back", "home", "recents", "notifications" -> 1_000L
             "wait" -> action.durationMs.coerceIn(0L, 30_000L)
             else -> 350L
         }
@@ -152,6 +156,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 startActivity(launchIntent)
                 true to "Opened $packageName"
             }
+            "open_url" -> openUrl(action)
             "tap_text" -> tapText(action.text)
             "tap_view_id" -> tapViewId(action.viewId)
             "tap" -> {
@@ -174,6 +179,35 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "wait" -> true to "Waiting"
             else -> false to "Unsupported phone action: ${action.type}"
         }
+    }
+
+    private fun openUrl(action: DeviceAction): Pair<Boolean, String> {
+        val requestedUrl = action.url.ifBlank { action.text }.trim()
+        if (requestedUrl.isBlank()) return false to "Open-url action is missing a URL."
+        val normalizedUrl = if (
+            requestedUrl.startsWith("https://", ignoreCase = true) ||
+            requestedUrl.startsWith("http://", ignoreCase = true)
+        ) {
+            requestedUrl
+        } else {
+            "https://$requestedUrl"
+        }
+        val targetPackage = if (action.packageName.isBlank()) {
+            null
+        } else {
+            resolvePackage(action.packageName)
+                ?: return false to "Could not find an installed app named “${action.packageName}”."
+        }
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(normalizedUrl)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (targetPackage != null) setPackage(targetPackage)
+        }
+        if (packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) == null) {
+            return false to "No installed app can open $normalizedUrl${targetPackage?.let { " in $it" } ?: ""}."
+        }
+        startActivity(intent)
+        return true to "Opened $normalizedUrl${targetPackage?.let { " in $it" } ?: ""}"
     }
 
     private fun tapText(text: String): Pair<Boolean, String> {
