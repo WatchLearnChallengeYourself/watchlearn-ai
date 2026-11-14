@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -70,11 +71,11 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                val intent = Intent(this, ScreenRecordingService::class.java).apply {
+                val intent = Intent(this@MainActivity, ScreenRecordingService::class.java).apply {
                     putExtra(ScreenRecordingService.EXTRA_RESULT_CODE, result.resultCode)
                     putExtra(ScreenRecordingService.EXTRA_RESULT_DATA, result.data)
                 }
-                ContextCompat.startForegroundService(this, intent)
+                ContextCompat.startForegroundService(this@MainActivity, intent)
             }
         }
 
@@ -91,7 +92,7 @@ class MainActivity : ComponentActivity() {
                     0 -> ChatScreen(
                         onRecord = { showRecordingConsent = true },
                         onStopRecording = {
-                            startService(Intent(this, ScreenRecordingService::class.java).setAction(ScreenRecordingService.ACTION_STOP))
+                            startService(Intent(this@MainActivity, ScreenRecordingService::class.java).setAction(ScreenRecordingService.ACTION_STOP))
                         },
                         onAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                     )
