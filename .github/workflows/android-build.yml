@@ -13,6 +13,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      WATCHLEARN_KEYSTORE_BASE64: ${{ secrets.WATCHLEARN_KEYSTORE_BASE64 }}
+      WATCHLEARN_KEYSTORE_PASSWORD: ${{ secrets.WATCHLEARN_KEYSTORE_PASSWORD }}
+      WATCHLEARN_KEY_ALIAS: ${{ secrets.WATCHLEARN_KEY_ALIAS }}
+      WATCHLEARN_KEY_PASSWORD: ${{ secrets.WATCHLEARN_KEY_PASSWORD }}
 
     steps:
       - name: Check out source
@@ -36,6 +41,15 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
+      - name: Verify permanent signing secrets
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          test -n "$WATCHLEARN_KEYSTORE_BASE64"
+          test -n "$WATCHLEARN_KEYSTORE_PASSWORD"
+          test -n "$WATCHLEARN_KEY_ALIAS"
+          test -n "$WATCHLEARN_KEY_PASSWORD"
 
       - name: Run lint and build debug APK
         run: gradle --no-daemon :app:lintDebug :app:assembleDebug
