@@ -3,6 +3,7 @@ package com.watchlearn.ai
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.os.Bundle
 import android.os.Handler
@@ -145,8 +146,8 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "launch_app", "open_app" -> {
                 val packageName = resolvePackage(action.packageName.ifBlank { action.text })
                     ?: return false to "Could not find an installed app named “${action.packageName.ifBlank { action.text }}”."
-                val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-                    ?: return false to "The app has no launch activity: $packageName"
+                val launchIntent = launchIntentForPackage(packageName)
+                    ?: return false to "The app is installed but has no launchable activity: $packageName"
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(launchIntent)
                 true to "Opened $packageName"
@@ -252,10 +253,14 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private fun resolvePackage(identifier: String): String? {
         val value = identifier.trim()
         if (value.isBlank()) return null
-        if (value.contains('.') && packageManager.getLaunchIntentForPackage(value) != null) return value
+        val launchableApps = queryLaunchableApps()
+        if (value.contains('.') && launchableApps.any { it.packageName.equals(value, ignoreCase = true) }) {
+            return value
+        }
         val known = mapOf(
             "chrome" to "com.android.chrome",
             "google chrome" to "com.android.chrome",
+            "chrome browser" to "com.android.chrome",
             "youtube" to "com.google.android.youtube",
             "gmail" to "com.google.android.gm",
             "google maps" to "com.google.android.apps.maps",
@@ -269,13 +274,48 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "tiktok" to "com.zhiliaoapp.musically"
         )
         known[value.lowercase(Locale.US)]?.let {
-            if (packageManager.getLaunchIntentForPackage(it) != null) return it
+            if (launchableApps.any { app -> app.packageName == it }) return it
         }
-        return packageManager.getInstalledApplications(0).firstOrNull { app ->
-            val label = packageManager.getApplicationLabel(app).toString()
-            label.equals(value, ignoreCase = true) ||
-                label.contains(value, ignoreCase = true)
-        }?.packageName
+        val exactMatch = launchableApps.firstOrNull { app ->
+            app.label.equals(value, ignoreCase = true)
+        }
+        val partialMatch = launchableApps.firstOrNull { app ->
+            app.label.contains(value, ignoreCase = true)
+        }
+        return (exactMatch ?: partialMatch)?.packageName
+    }
+
+    private data class LaunchableApp(val packageName: String, val label: String)
+
+    private fun queryLaunchableApps(): List<LaunchableApp> {
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return packageManager.queryIntentActivities(
+            launcherIntent,
+            PackageManager.MATCH_ALL
+        ).mapNotNull { resolveInfo ->
+            val activityInfo = resolveInfo.activityInfo ?: return@mapNotNull null
+            val label = resolveInfo.loadLabel(packageManager)?.toString()
+                ?: activityInfo.applicationInfo?.let { packageManager.getApplicationLabel(it).toString() }
+                ?: activityInfo.packageName
+            LaunchableApp(activityInfo.packageName, label)
+        }.distinctBy { it.packageName }
+    }
+
+    private fun launchIntentForPackage(packageName: String): Intent? {
+        val launcherIntent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setPackage(packageName)
+        val launcherActivity = packageManager.queryIntentActivities(
+            launcherIntent,
+            PackageManager.MATCH_ALL
+        ).firstOrNull()?.activityInfo
+        return if (launcherActivity != null) {
+            Intent(Intent.ACTION_MAIN)
+                .addCategory(Intent.CATEGORY_LAUNCHER)
+                .setClassName(launcherActivity.packageName, launcherActivity.name)
+        } else {
+            packageManager.getLaunchIntentForPackage(packageName)
+        }
     }
 
     companion object {
