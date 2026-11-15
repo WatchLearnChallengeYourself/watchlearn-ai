@@ -8,7 +8,8 @@ This is the source project for a consent-first Android assistant. It includes:
 - A handoff to Android Accessibility Settings.
 - Chat, automation, model-provider, and settings screens.
 - A provider selector for OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoints.
-- Clear separation between personal sideload mode and Play Store mode.
+- Separate build flavors: `personal` includes the opt-in Accessibility Service action executor; `playStore` omits that service and disables cross-app phone-control actions.
+- Personal sideload actions can open URLs, inspect visible accessibility nodes, find text fields, enter or clear text, click visible labels/content descriptions, swipe, and use Back/Home/Recents after the user approves the plan.
 
 ## Important implementation status
 
@@ -16,7 +17,7 @@ This workspace does not contain an Android SDK or Gradle distribution, so an APK
 
 1. Connect the app to an authenticated HTTPS backend.
 2. Implement backend account creation, sessions, tenant isolation, encrypted API-key storage, key rotation, provider adapters, spend limits, and audit logs.
-3. Implement a narrow, typed action registry for supported workflows. Do not ship unrestricted autonomous AccessibilityService behavior to Google Play.
+3. Keep personal sideload phone control limited to user-approved action plans. Do not ship unrestricted autonomous AccessibilityService behavior to Google Play.
 4. Add Android tests on real Android 10, 14, and 15 devices and produce separate sideload and release builds.
 
 ## Recording behavior
@@ -26,14 +27,14 @@ The app asks for its own confirmation first, then opens Android's system capture
 ## Build on a machine with Android SDK
 
 ```bash
-./gradlew :app:assembleDebug
+./gradlew :app:assemblePersonalDebug
 ```
 
 If `./gradlew` is not present after importing the project, open it in Android Studio and let Gradle sync, or generate a Gradle wrapper with Gradle 8.9. The debug APK will be under `app/build/outputs/apk/debug/`.
 
 ## GitHub Actions build
 
-The repository includes `.github/workflows/android-build.yml`. Every push to `main`, pull request, or manual workflow run installs the Android SDK and Gradle, runs lint, builds the debug APK and unsigned release AAB, and uploads both as a `watchlearn-ai-builds` workflow artifact. A signed Play Store release still requires a signing key configured as protected GitHub secrets.
+The repository includes `.github/workflows/android-build.yml`. Every push to `main`, pull request, or manual workflow run installs the Android SDK and Gradle, builds the personal sideload APK and the Play Store AAB as separate flavors, and uploads both as a `watchlearn-ai-distributions` workflow artifact. The permanent signing key is supplied through protected GitHub secrets.
 
 ## Backend contract to add next
 
