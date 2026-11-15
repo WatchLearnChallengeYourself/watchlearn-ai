@@ -118,11 +118,19 @@ private val REASONING_MODE_OPTIONS = listOf("Standard", "Pro")
 private const val DEVICE_ACTION_INSTRUCTIONS = """
 Return only valid JSON with this exact shape:
 {"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
-Allowed action types are launch_app, open_url, tap_text, tap_view_id, tap, type_text, swipe, back, home, recents, notifications, and wait.
+Allowed action types are launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
 Use launch_app with an app name when the user asks to open an app. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
+When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
 Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
 """
+
+private const val PLAY_STORE_ACTION_INSTRUCTIONS = """
+Return a normal helpful response. This Play Store build does not have phone-control actions enabled and must not return launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, or wait actions.
+"""
+
+private fun actionInstructions(phoneControlEnabled: Boolean): String =
+    if (phoneControlEnabled) DEVICE_ACTION_INSTRUCTIONS else PLAY_STORE_ACTION_INSTRUCTIONS
 
 private data class Automation(
     val name: String,
@@ -167,6 +175,8 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         val chatGptAuth = remember { ChatGptPlanAuth(this@MainActivity) }
         val scrollState = rememberScrollState()
+        val phoneControlEnabled = BuildConfig.PERSONAL_SIDELOAD_MODE &&
+            deploymentMode == "Personal sideload mode"
         val notificationPermissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { }
@@ -240,7 +250,8 @@ class MainActivity : ComponentActivity() {
                             model = selectedModel,
                             description = trimmed,
                             reasoningEffort = selectedReasoningEffort,
-                            reasoningMode = selectedReasoningMode
+                            reasoningMode = selectedReasoningMode,
+                            phoneControlEnabled = phoneControlEnabled
                         )
                     } else {
                         requestTaskPlan(
@@ -248,14 +259,19 @@ class MainActivity : ComponentActivity() {
                             baseUrl = apiBaseUrl,
                             model = selectedModel,
                             description = trimmed,
-                            reasoningEffort = selectedReasoningEffort
+                            reasoningEffort = selectedReasoningEffort,
+                            phoneControlEnabled = phoneControlEnabled
                         )
                     }
                     val devicePlan = parseDevicePlan(response)
                     if (devicePlan != null) {
                         taskOutput = formatDevicePlan(devicePlan)
-                        pendingDevicePlan = devicePlan.takeIf { it.actions.isNotEmpty() }
-                        if (pendingDevicePlan != null) {
+                        pendingDevicePlan = devicePlan.takeIf {
+                            phoneControlEnabled && it.actions.isNotEmpty()
+                        }
+                        if (!phoneControlEnabled && devicePlan.actions.isNotEmpty()) {
+                            taskStatus = "Phone control is disabled in Play Store mode."
+                        } else if (pendingDevicePlan != null) {
                             if (WatchLearnAccessibilityService.isReady()) {
                                 showActionApproval = true
                                 taskStatus = "Phone-control plan ready. Review and approve the proposed actions."
@@ -387,7 +403,8 @@ class MainActivity : ComponentActivity() {
                         onAccessibility = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                             taskStatus = "Android accessibility settings opened."
-                        }
+                        },
+                        phoneControlEnabled = phoneControlEnabled
                     )
                     1 -> AutomationScreen(
                         automations = automations,
@@ -580,7 +597,8 @@ private fun ChatScreen(
     onShareToChatGPT: (String) -> Unit,
     onRecord: () -> Unit,
     onStopRecording: () -> Unit,
-    onAccessibility: () -> Unit
+    onAccessibility: () -> Unit,
+    phoneControlEnabled: Boolean
 ) {
     var command by rememberSaveable { mutableStateOf("") }
     Column(
@@ -610,8 +628,10 @@ private fun ChatScreen(
             OutlinedButton(onClick = onRecord) { Text("Record approved task") }
             OutlinedButton(onClick = onStopRecording) { Text("Stop recording") }
         }
-        OutlinedButton(onClick = onAccessibility) {
-            Text("Enable Android accessibility")
+        if (phoneControlEnabled) {
+            OutlinedButton(onClick = onAccessibility) {
+                Text("Enable Android accessibility")
+            }
         }
         if (taskOutput.isNotBlank()) {
             Card(Modifier.fillMaxWidth()) {
@@ -619,7 +639,11 @@ private fun ChatScreen(
             }
         }
         Text(
-            "Run task now can propose phone actions such as opening an app, tapping visible controls, typing into the focused field, swiping, Back, Home, and Recents. Android accessibility must be enabled, and you must approve each proposed action plan.",
+            if (phoneControlEnabled) {
+                "Personal sideload mode can propose phone actions such as opening apps, finding visible controls, entering text into fields, pressing buttons, swiping, Back, Home, and Recents. Android accessibility must be enabled, and you must approve each proposed action plan."
+            } else {
+                "Play Store mode can plan tasks but does not include cross-app phone control or Accessibility Service automation."
+            },
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -937,7 +961,8 @@ private suspend fun requestChatGptPlan(
     model: String,
     description: String,
     reasoningEffort: String,
-    reasoningMode: String
+    reasoningMode: String,
+    phoneControlEnabled: Boolean
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection)
     try {
@@ -969,7 +994,7 @@ private suspend fun requestChatGptPlan(
                 "instructions",
                 "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
                     "Do not claim you performed actions. Identify every step that needs user permission.\n" +
-                    DEVICE_ACTION_INSTRUCTIONS
+                    actionInstructions(phoneControlEnabled)
             )
             .put("input", input)
         if (reasoning.length() > 0) payload.put("reasoning", reasoning)
@@ -1043,7 +1068,8 @@ private suspend fun requestTaskPlan(
     baseUrl: String,
     model: String,
     description: String,
-    reasoningEffort: String
+    reasoningEffort: String,
+    phoneControlEnabled: Boolean
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL(apiEndpoint(baseUrl, "/chat/completions")).openConnection() as HttpURLConnection)
     try {
@@ -1055,7 +1081,7 @@ private suspend fun requestTaskPlan(
                         "content",
                         "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
                             "Do not claim you performed actions. Identify every step that needs user permission.\n" +
-                            DEVICE_ACTION_INSTRUCTIONS
+                            actionInstructions(phoneControlEnabled)
                     )
             )
             .put(JSONObject().put("role", "user").put("content", description))
