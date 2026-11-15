@@ -10,6 +10,19 @@ android {
     namespace = "com.watchlearn.ai"
     compileSdk = 35
 
+    flavorDimensions += "distribution"
+
+    productFlavors {
+        create("personal") {
+            dimension = "distribution"
+            buildConfigField("boolean", "PERSONAL_SIDELOAD_MODE", "true")
+        }
+        create("playStore") {
+            dimension = "distribution"
+            buildConfigField("boolean", "PERSONAL_SIDELOAD_MODE", "false")
+        }
+    }
+
     val signingKeystoreBase64 = System.getenv("WATCHLEARN_KEYSTORE_BASE64")
     val signingStorePassword = System.getenv("WATCHLEARN_KEYSTORE_PASSWORD")
     val signingKeyAlias = System.getenv("WATCHLEARN_KEY_ALIAS")
