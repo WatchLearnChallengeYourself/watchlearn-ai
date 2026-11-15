@@ -51,17 +51,22 @@ jobs:
           test -n "$WATCHLEARN_KEY_ALIAS"
           test -n "$WATCHLEARN_KEY_PASSWORD"
 
-      - name: Run lint and build debug APK
-        run: gradle --no-daemon :app:lintDebug :app:assembleDebug
+      - name: Run lint and build personal sideload APK
+        run: gradle --no-daemon :app:lintPersonalDebug :app:assemblePersonalDebug
 
-      - name: Build unsigned release bundle
-        run: gradle --no-daemon :app:bundleRelease
+      - name: Build Play Store release bundle
+        run: gradle --no-daemon :app:bundlePlayStoreRelease
 
-      - name: Upload APK and AAB
+      - name: Prepare distribution files
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp app/build/outputs/apk/personal/debug/app-personal-debug.apk artifacts/watchlearn-ai-personal-sideload.apk
+          cp app/build/outputs/bundle/playStoreRelease/app-playStore-release.aab artifacts/watchlearn-ai-play-store.aab
+
+      - name: Upload personal APK and Play Store AAB
         uses: actions/upload-artifact@v4
         with:
-          name: watchlearn-ai-builds
-          path: |
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/bundle/release/*.aab
+          name: watchlearn-ai-distributions
+          path: artifacts/*
           if-no-files-found: error
