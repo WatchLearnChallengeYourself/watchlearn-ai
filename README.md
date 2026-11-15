@@ -10,6 +10,8 @@ This is the source project for a consent-first Android assistant. It includes:
 - A provider selector for OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoints.
 - Separate build flavors: `personal` includes the opt-in Accessibility Service action executor; `playStore` omits that service and disables cross-app phone-control actions.
 - Personal sideload actions can open URLs, inspect visible accessibility nodes, find text fields, enter or clear text, click visible labels/content descriptions, swipe, and use Back/Home/Recents after the user approves the plan.
+- The personal sideload build now retries transient Chrome/file-picker accessibility lookups for several seconds instead of stopping after the first missing control. The Chat screen also includes a `Load Clipchamp recording timeline` command that expands into URL, wait, project, import, timeline, trim, export, and verification steps.
+- An approved phone task can now be paused and resumed. While it is running, an additional request can be planned separately, reviewed, and appended to the remaining action queue without repeating the existing steps.
 
 ## Important implementation status
 
@@ -19,6 +21,12 @@ This workspace does not contain an Android SDK or Gradle distribution, so an APK
 2. Implement backend account creation, sessions, tenant isolation, encrypted API-key storage, key rotation, provider adapters, spend limits, and audit logs.
 3. Keep personal sideload phone control limited to user-approved action plans. Do not ship unrestricted autonomous AccessibilityService behavior to Google Play.
 4. Add Android tests on real Android 10, 14, and 15 devices and produce separate sideload and release builds.
+
+## Clipchamp recording workflow
+
+In the personal sideload build, enable Android Accessibility, tap `Load Clipchamp recording timeline`, then tap `Run task now`. Review the proposed actions and approve them. Android still requires the user to approve the system screen-recording prompt, sign into Clipchamp privately if needed, and choose the harmless sample clip in the file picker. The app does not invent a file selection or claim an export completed when the screen did not show it.
+
+While the approved task runs, use `Pause task` to stop before the next action and `Resume task` to continue. To add work, replace the command field with the new request, tap `Add request to running task`, review the new action list, and tap `Add and continue`. The addition is rejected if the original task has already finished.
 
 ## Recording behavior
 
