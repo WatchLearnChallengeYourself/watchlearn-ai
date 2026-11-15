@@ -105,6 +105,12 @@ fun describeDeviceAction(action: DeviceAction): String = when (action.type) {
 
 class WatchLearnAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
+    @Volatile private var running = false
+    @Volatile private var paused = false
+    private var queuedActions = mutableListOf<DeviceAction>()
+    private var nextActionIndex = 0
+    private var completionCallback: ((Boolean, String) -> Unit)? = null
+    private var executionGeneration = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -121,30 +127,125 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     }
 
     fun execute(actions: List<DeviceAction>, callback: (Boolean, String) -> Unit) {
-        executeAt(actions, 0, callback)
+        handler.post {
+            if (running) {
+                callback(false, "A phone task is already running.")
+                return@post
+            }
+            queuedActions = actions.toMutableList()
+            nextActionIndex = 0
+            paused = false
+            running = true
+            executionGeneration += 1
+            completionCallback = callback
+            continueExecution()
+        }
     }
 
-    private fun executeAt(
-        actions: List<DeviceAction>,
-        index: Int,
-        callback: (Boolean, String) -> Unit
+    fun pauseTask(): Boolean {
+        if (!running) return false
+        handler.post {
+            paused = true
+            executionGeneration += 1
+        }
+        return true
+    }
+
+    fun resumeTask(): Boolean {
+        if (!running) return false
+        handler.post {
+            paused = false
+            executionGeneration += 1
+            continueExecution()
+        }
+        return true
+    }
+
+    fun appendTask(actions: List<DeviceAction>): Boolean {
+        if (!running || actions.isEmpty()) return false
+        handler.post {
+            if (running) queuedActions.addAll(actions)
+        }
+        return true
+    }
+
+    fun stopTask(): Boolean {
+        if (!running) return false
+        handler.post {
+            executionGeneration += 1
+            finish(false, "Phone task stopped by the user.")
+        }
+        return true
+    }
+
+    private fun continueExecution() {
+        if (!running || paused) return
+        if (nextActionIndex >= queuedActions.size) {
+            finish(true, "Approved phone actions completed.")
+            return
+        }
+        val action = queuedActions[nextActionIndex]
+        val generation = executionGeneration
+        runActionWithRetry(action, 0, generation) { result ->
+            if (!running) return@runActionWithRetry
+            if (!result.first) {
+                finish(false, "${describeDeviceAction(action)} failed after waiting for the screen: ${result.second}")
+                return@runActionWithRetry
+            }
+            nextActionIndex += 1
+            val delay = when (action.type) {
+                "launch_app", "open_app", "open_url", "back", "home", "recents", "notifications" -> 1_200L
+                "wait" -> action.durationMs.coerceIn(0L, 30_000L)
+                else -> 500L
+            }
+            handler.postDelayed({
+                if (generation == executionGeneration) continueExecution()
+            }, delay)
+        }
+    }
+
+    private fun finish(success: Boolean, message: String) {
+        if (!running) return
+        running = false
+        paused = false
+        executionGeneration += 1
+        queuedActions.clear()
+        nextActionIndex = 0
+        val callback = completionCallback
+        completionCallback = null
+        callback?.invoke(success, message)
+    }
+
+    /**
+     * Chrome and file-picker accessibility trees often need a few seconds to
+     * appear after an app launch or navigation. A single failed lookup used to
+     * stop the entire approved plan, which looked like "Chrome opened and then
+     * nothing happened." Retry only UI-dependent actions.
+     */
+    private fun runActionWithRetry(
+        action: DeviceAction,
+        attempt: Int,
+        generation: Long,
+        callback: (Pair<Boolean, String>) -> Unit
     ) {
-        if (index >= actions.size) {
-            callback(true, "Approved phone actions completed.")
-            return
-        }
-        val action = actions[index]
+        if (!running || paused || generation != executionGeneration) return
         val result = runAction(action)
-        if (!result.first) {
-            callback(false, result.second)
+        val retryable = action.type in setOf(
+            "tap_text",
+            "tap_content_description",
+            "tap_view_id",
+            "tap",
+            "type_text",
+            "clear_text",
+            "swipe"
+        )
+        if (result.first || !retryable || attempt >= 8) {
+            callback(result)
             return
         }
-        val delay = when (action.type) {
-            "launch_app", "open_app", "open_url", "back", "home", "recents", "notifications" -> 1_000L
-            "wait" -> action.durationMs.coerceIn(0L, 30_000L)
-            else -> 350L
-        }
-        handler.postDelayed({ executeAt(actions, index + 1, callback) }, delay)
+        handler.postDelayed({
+            runActionWithRetry(action, attempt + 1, generation, callback)
+        }, 750L)
     }
 
     private fun runAction(action: DeviceAction): Pair<Boolean, String> {
@@ -438,6 +539,19 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             service.handler.post { service.execute(actions, callback) }
             return true
         }
+
+        fun pauseApproved(): Boolean = instance?.pauseTask() == true
+
+        fun resumeApproved(): Boolean = instance?.resumeTask() == true
+
+        fun appendApproved(actions: List<DeviceAction>): Boolean =
+            instance?.appendTask(actions) == true
+
+        fun stopApproved(): Boolean = instance?.stopTask() == true
+
+        fun isRunning(): Boolean = instance?.running == true
+
+        fun isPaused(): Boolean = instance?.paused == true
 
         fun isEnabled(service: android.content.Context): Boolean {
             val expected = "${service.packageName}/${WatchLearnAccessibilityService::class.java.name}"
