@@ -89,9 +89,11 @@ fun describeDeviceAction(action: DeviceAction): String = when (action.type) {
     "launch_app", "open_app" -> "Open ${action.packageName.ifBlank { action.text.ifBlank { "the app" } }}"
     "open_url" -> "Open ${action.url.ifBlank { action.text }}${action.packageName.takeIf { it.isNotBlank() }?.let { " in $it" } ?: ""}"
     "tap_text" -> "Tap “${action.text}”"
+    "tap_content_description" -> "Tap control described as “${action.text}”"
     "tap_view_id" -> "Tap view ${action.viewId}"
     "tap" -> "Tap screen at (${action.x ?: 0f}, ${action.y ?: 0f})"
     "type_text" -> "Type “${action.text}”"
+    "clear_text" -> "Clear the selected text field"
     "swipe" -> "Swipe on the screen"
     "back" -> "Press Back"
     "home" -> "Go Home"
@@ -158,6 +160,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             }
             "open_url" -> openUrl(action)
             "tap_text" -> tapText(action.text)
+            "tap_content_description" -> tapContentDescription(action.text)
             "tap_view_id" -> tapViewId(action.viewId)
             "tap" -> {
                 val x = action.x ?: return false to "Tap action is missing x."
@@ -165,6 +168,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 dispatchTap(x, y)
             }
             "type_text" -> typeText(action)
+            "clear_text" -> clearText(action)
             "swipe" -> {
                 val x1 = action.x ?: return false to "Swipe action is missing x."
                 val y1 = action.y ?: return false to "Swipe action is missing y."
@@ -212,8 +216,22 @@ class WatchLearnAccessibilityService : AccessibilityService() {
 
     private fun tapText(text: String): Pair<Boolean, String> {
         if (text.isBlank()) return false to "Tap-text action is missing text."
-        val node = rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.firstOrNull()
+        val root = rootInActiveWindow ?: return false to "No active window is available."
+        val node = root.findAccessibilityNodeInfosByText(text).firstOrNull()
+            ?: allNodes(root).firstOrNull { node ->
+                node.text?.toString()?.contains(text, ignoreCase = true) == true ||
+                    node.contentDescription?.toString()?.contains(text, ignoreCase = true) == true
+            }
             ?: return false to "Could not find visible text “$text”."
+        return clickNode(node)
+    }
+
+    private fun tapContentDescription(description: String): Pair<Boolean, String> {
+        if (description.isBlank()) return false to "Tap-content-description action is missing text."
+        val root = rootInActiveWindow ?: return false to "No active window is available."
+        val node = allNodes(root).firstOrNull {
+            it.contentDescription?.toString()?.contains(description, ignoreCase = true) == true
+        } ?: return false to "Could not find a visible control described as “$description”."
         return clickNode(node)
     }
 
@@ -238,11 +256,9 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private fun typeText(action: DeviceAction): Pair<Boolean, String> {
         if (action.text.isBlank()) return false to "Type-text action is missing text."
         val root = rootInActiveWindow ?: return false to "No active window is available for typing."
-        val node = if (action.viewId.isNotBlank()) {
-            root.findAccessibilityNodeInfosByViewId(action.viewId).firstOrNull()
-        } else {
-            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        } ?: return false to "No focused text field was found."
+        val node = findTextField(root, action)
+            ?: return false to "Could not find a visible text field."
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val args = Bundle().apply {
             putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -250,7 +266,63 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             )
         }
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) to
-            "Entered text in the focused field."
+            "Entered text in the selected field."
+    }
+
+    private fun clearText(action: DeviceAction): Pair<Boolean, String> {
+        val root = rootInActiveWindow ?: return false to "No active window is available for clearing text."
+        val node = findTextField(root, action)
+            ?: return false to "Could not find a visible text field to clear."
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle().apply {
+            putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                ""
+            )
+        }
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) to
+            "Cleared the selected field."
+    }
+
+    private fun findTextField(
+        root: AccessibilityNodeInfo,
+        action: DeviceAction
+    ): AccessibilityNodeInfo? {
+        if (action.viewId.isNotBlank()) {
+            root.findAccessibilityNodeInfosByViewId(action.viewId)
+                .firstOrNull { it.isEditable }
+                ?.let { return it }
+        }
+
+        val nodes = allNodes(root)
+        if (action.label.isNotBlank()) {
+            nodes.firstOrNull { node ->
+                node.isEditable && listOf(
+                    node.text,
+                    node.hintText,
+                    node.contentDescription
+                ).any { value ->
+                    value?.toString()?.contains(action.label, ignoreCase = true) == true
+                }
+            }?.let { return it }
+        }
+
+        root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?.takeIf { it.isEditable }
+            ?.let { return it }
+        return nodes.firstOrNull { it.isEditable }
+    }
+
+    private fun allNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo) {
+            result += node
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let(::visit)
+            }
+        }
+        visit(root)
+        return result
     }
 
     private fun dispatchTap(x: Float, y: Float): Pair<Boolean, String> {
