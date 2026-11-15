@@ -121,9 +121,18 @@ Return only valid JSON with this exact shape:
 Allowed action types are launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
 Use launch_app with an app name when the user asks to open an app. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
 When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
+When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching Chrome, opening a URL, opening a project, opening a file picker, or pressing Export when the next control needs time to appear. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For a recording workflow, include the visible proof steps in order: open the requested URL, wait for the page, open the project, import media if the control is visible, place it on the timeline, trim it, open Export, choose the requested free resolution, and wait for the export result. Never claim a file was selected or an export completed if the device did not visibly show it.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
 Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
 """
+
+private const val CLIPCHAMP_RECORDING_TASK =
+    "Open Chrome and go to https://app.clipchamp.com/. Wait 3 seconds for the page. " +
+        "Open a new Clipchamp video project. Wait 3 seconds. Tap Import media and let me choose " +
+        "one harmless 10-second sample clip if a file picker appears. Wait 2 seconds. Place the clip " +
+        "on the timeline. Wait 2 seconds. Trim about one second from the beginning. Wait 2 seconds. " +
+        "Open Export, choose the highest free resolution shown up to 1080p, and wait 3 seconds for " +
+        "the export result. Do not claim a file was selected or exported unless it is visibly shown."
 
 private const val PLAY_STORE_ACTION_INSTRUCTIONS = """
 Return a normal helpful response. This Play Store build does not have phone-control actions enabled and must not return launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, or wait actions.
@@ -169,6 +178,8 @@ class MainActivity : ComponentActivity() {
         var taskOutput by rememberSaveable { mutableStateOf("") }
         var pendingDevicePlan by remember { mutableStateOf<DevicePlan?>(null) }
         var showActionApproval by remember { mutableStateOf(false) }
+        var pendingAppendPlan by remember { mutableStateOf<DevicePlan?>(null) }
+        var showAppendApproval by remember { mutableStateOf(false) }
         var deploymentMode by rememberSaveable { mutableStateOf("Personal sideload mode") }
         var importedChats by remember { mutableStateOf<List<ImportedChat>>(emptyList()) }
         val automations = remember { mutableStateListOf<Automation>() }
@@ -292,6 +303,61 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        fun addToRunningTask(description: String) {
+            val trimmed = description.trim()
+            if (trimmed.isEmpty()) {
+                taskStatus = "Describe the extra step before adding it."
+                return
+            }
+            if (!phoneControlEnabled || !WatchLearnAccessibilityService.isRunning()) {
+                taskStatus = "No approved phone task is currently running. Run and approve the main task first."
+                return
+            }
+            if (apiKey.isBlank() && chatGptSession == null) {
+                taskStatus = "Connect ChatGPT or an API key before planning an added step."
+                return
+            }
+            taskStatus = "Planning the additional step..."
+            scope.launch {
+                try {
+                    val response = if (chatGptSession != null) {
+                        requestChatGptPlan(
+                            accessToken = chatGptSession!!.accessToken,
+                            model = selectedModel,
+                            description = "This is an additional step for an already-running approved Android task. " +
+                                "Return only the new actions to append; do not repeat or undo existing actions. " + trimmed,
+                            reasoningEffort = selectedReasoningEffort,
+                            reasoningMode = selectedReasoningMode,
+                            phoneControlEnabled = phoneControlEnabled
+                        )
+                    } else {
+                        requestTaskPlan(
+                            apiKey = apiKey,
+                            baseUrl = apiBaseUrl,
+                            model = selectedModel,
+                            description = "This is an additional step for an already-running approved Android task. " +
+                                "Return only the new actions to append; do not repeat or undo existing actions. " + trimmed,
+                            reasoningEffort = selectedReasoningEffort,
+                            phoneControlEnabled = phoneControlEnabled
+                        )
+                    }
+                    val plan = parseDevicePlan(response)
+                    if (plan == null || plan.actions.isEmpty()) {
+                        taskStatus = "The added request did not produce phone actions."
+                        taskOutput = response
+                    } else {
+                        pendingAppendPlan = plan
+                        taskOutput = "Proposed additions:\n\n" + formatDevicePlan(plan)
+                        showAppendApproval = true
+                        taskStatus = "Review the proposed additions before appending them."
+                    }
+                } catch (error: Exception) {
+                    taskStatus = "The added request could not be planned."
+                    taskOutput = error.message ?: "OpenAI request failed."
+                }
+            }
+        }
+
         fun refreshModels() {
             val bearerToken = apiKey.ifBlank { chatGptSession?.accessToken.orEmpty() }
             if (bearerToken.isBlank()) {
@@ -389,6 +455,21 @@ class MainActivity : ComponentActivity() {
                         taskOutput = taskOutput,
                         onPlanTask = { runTask(it) },
                         onRunTask = { runTask(it) },
+                        onPauseTask = {
+                            taskStatus = if (WatchLearnAccessibilityService.pauseApproved()) {
+                                "Task paused. Nothing else will run until you tap Resume task."
+                            } else {
+                                "No approved phone task is currently running."
+                            }
+                        },
+                        onResumeTask = {
+                            taskStatus = if (WatchLearnAccessibilityService.resumeApproved()) {
+                                "Task resumed."
+                            } else {
+                                "No paused phone task is available to resume."
+                            }
+                        },
+                        onAddTask = { addToRunningTask(it) },
                         onShareToChatGPT = { shareTaskToChatGPT(it) },
                         onRecord = { showRecordingConsent = true },
                         onStopRecording = {
@@ -583,6 +664,50 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        if (showAppendApproval) {
+            val plan = pendingAppendPlan
+            if (plan != null) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showAppendApproval = false
+                        pendingAppendPlan = null
+                        taskStatus = "The additional actions were not added."
+                    },
+                    title = { Text("Add actions to running task?") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(plan.summary)
+                            plan.actions.forEachIndexed { index, action ->
+                                Text("${index + 1}. ${describeDeviceAction(action)}")
+                            }
+                            Text(
+                                "These actions will be appended after the current step. Review them before continuing.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showAppendApproval = false
+                            val added = WatchLearnAccessibilityService.appendApproved(plan.actions)
+                            pendingAppendPlan = null
+                            taskStatus = if (added) {
+                                "Additional actions added to the running task."
+                            } else {
+                                "The task finished before the additional actions could be added."
+                            }
+                        }) { Text("Add and continue") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showAppendApproval = false
+                            pendingAppendPlan = null
+                            taskStatus = "The additional actions were not added."
+                        }) { Text("Cancel") }
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -594,6 +719,9 @@ private fun ChatScreen(
     taskOutput: String,
     onPlanTask: (String) -> Unit,
     onRunTask: (String) -> Unit,
+    onPauseTask: () -> Unit,
+    onResumeTask: () -> Unit,
+    onAddTask: (String) -> Unit,
     onShareToChatGPT: (String) -> Unit,
     onRecord: () -> Unit,
     onStopRecording: () -> Unit,
@@ -621,6 +749,24 @@ private fun ChatScreen(
             Button(onClick = { onPlanTask(command) }) { Text("Plan task") }
             Button(onClick = { onRunTask(command) }) { Text("Run task now") }
         }
+        if (phoneControlEnabled) {
+            OutlinedButton(
+                onClick = { command = CLIPCHAMP_RECORDING_TASK },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Load Clipchamp recording timeline")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(onClick = onPauseTask) { Text("Pause task") }
+                OutlinedButton(onClick = onResumeTask) { Text("Resume task") }
+            }
+            OutlinedButton(
+                onClick = { onAddTask(command) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Add request to running task")
+            }
+        }
         OutlinedButton(onClick = { onShareToChatGPT(command) }) {
             Text("Send task to ChatGPT")
         }
@@ -629,6 +775,10 @@ private fun ChatScreen(
             OutlinedButton(onClick = onStopRecording) { Text("Stop recording") }
         }
         if (phoneControlEnabled) {
+            Text(
+                "Recording order: tap Record approved task first and allow Android's system prompt; then tap Run task now, review the plan, and approve it. Android still requires you to choose the sample file in the file picker.",
+                style = MaterialTheme.typography.bodySmall
+            )
             OutlinedButton(onClick = onAccessibility) {
                 Text("Enable Android accessibility")
             }
@@ -640,7 +790,7 @@ private fun ChatScreen(
         }
         Text(
             if (phoneControlEnabled) {
-                "Personal sideload mode can propose phone actions such as opening apps, finding visible controls, entering text into fields, pressing buttons, swiping, Back, Home, and Recents. Android accessibility must be enabled, and you must approve each proposed action plan."
+                "Personal sideload mode can propose phone actions, pause or resume an approved task, and append a newly approved action plan while it runs. Android accessibility must be enabled, and you must approve each proposed plan."
             } else {
                 "Play Store mode can plan tasks but does not include cross-app phone control or Accessibility Service automation."
             },
