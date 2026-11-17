@@ -310,6 +310,13 @@ class WatchLearnAccessibilityService : AccessibilityService() {
 
     private fun openBrowser(action: DeviceAction): Pair<Boolean, String> {
         val requestedUrl = action.url.ifBlank { action.text }.trim()
+
+        // If the WatchLearn AI Browser is already visible, keep the current page.
+        // This is important for button-only tasks such as "tap Get welcome bonus".
+        if (BrowserTaskBridge.reuseCurrentBrowser(requestedUrl)) {
+            return true to "Reused the current WatchLearn AI Browser page."
+        }
+
         val intent = if (requestedUrl.isBlank()) {
             Intent(Intent.ACTION_MAIN)
         } else {
@@ -320,7 +327,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             Intent(Intent.ACTION_VIEW, Uri.parse(normalizedUrl))
         }.apply {
             setClassName("com.watchlearn.ai", "com.watchlearn.ai.InAppBrowserActivity")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         return runCatching {
             startActivity(intent)
@@ -341,6 +348,19 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         } else {
             "https://$requestedUrl"
         }
+
+        val requestedPackage = action.packageName.trim()
+        if (
+            requestedPackage.isBlank() ||
+            requestedPackage.equals("WatchLearn Browser", ignoreCase = true) ||
+            requestedPackage.equals("WatchLearn AI Browser", ignoreCase = true) ||
+            requestedPackage.equals("com.watchlearn.ai", ignoreCase = true)
+        ) {
+            if (BrowserTaskBridge.reuseCurrentBrowser(normalizedUrl)) {
+                return true to "Reused the current WatchLearn AI Browser page."
+            }
+        }
+
         val targetPackage = if (action.packageName.isBlank()) {
             null
         } else {
@@ -362,14 +382,56 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private fun tapText(text: String): Pair<Boolean, String> {
         if (text.isBlank()) return false to "Tap-text action is missing text."
         val root = rootInActiveWindow ?: return false to "No active window is available."
-        val node = root.findAccessibilityNodeInfosByText(text).firstOrNull()
-            ?: allNodes(root).firstOrNull { node ->
-                node.text?.toString()?.contains(text, ignoreCase = true) == true ||
-                    node.contentDescription?.toString()?.contains(text, ignoreCase = true) == true
+
+        val target = normalizeUiText(text)
+        val candidate = allNodes(root)
+            .asSequence()
+            .filter { it.isVisibleToUser && it.isEnabled }
+            .mapNotNull { node ->
+                val values = listOf(
+                    node.text?.toString().orEmpty(),
+                    node.contentDescription?.toString().orEmpty(),
+                    node.hintText?.toString().orEmpty()
+                ).filter { it.isNotBlank() }
+                val exact = values.any { normalizeUiText(it) == target }
+                val contains = values.any {
+                    val normalized = normalizeUiText(it)
+                    normalized.contains(target) || target.contains(normalized)
+                }
+                if (!exact && !contains) {
+                    null
+                } else {
+                    val className = node.className?.toString().orEmpty()
+                    val score =
+                        (if (exact) 100 else 60) +
+                            (if (node.isClickable) 25 else 0) +
+                            (if (className.contains("Button", ignoreCase = true)) 20 else 0) +
+                            (if (node.contentDescription?.toString()?.isNotBlank() == true) 5 else 0)
+                    node to score
+                }
             }
-            ?: return false to "Could not find visible text “$text”."
-        return clickNode(node)
+            .maxByOrNull { it.second }
+            ?.first
+            ?: return false to "Could not find a visible button or control labeled “$text”."
+
+        val clicked = clickNode(candidate)
+        if (clicked.first) return clicked
+
+        // Some WebView buttons expose their text and bounds but not ACTION_CLICK.
+        // Tap the center of that exact accessible control as a fallback.
+        val bounds = android.graphics.Rect()
+        candidate.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            return dispatchTap(bounds.centerX().toFloat(), bounds.centerY().toFloat)
+        }
+        return clicked
     }
+
+    private fun normalizeUiText(value: String): String =
+        value.lowercase(Locale.US)
+            .replace("&", "and")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
 
     private fun tapContentDescription(description: String): Pair<Boolean, String> {
         if (description.isBlank()) return false to "Tap-content-description action is missing text."
