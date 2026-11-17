@@ -288,9 +288,10 @@ class MainActivity : ComponentActivity() {
                             apiKey = apiKey,
                             baseUrl = apiBaseUrl,
                             model = selectedModel,
-                            description = trimmed,
+                            description = planningDescription,
                             reasoningEffort = selectedReasoningEffort,
-                            phoneControlEnabled = phoneControlEnabled
+                            phoneControlEnabled = phoneControlEnabled,
+                            screenImageDataUrl = screenImageDataUrl
                         )
                     }
                     val devicePlan = parseDevicePlan(response)
@@ -377,7 +378,7 @@ class MainActivity : ComponentActivity() {
                                     "Return only the new actions to append; do not repeat existing actions. " +
                                     trimmed
                             } else {
-                                "$contextInstruction" +
+                                "$browserDescription" +
                                     "Create a replacement task plan for the browser. " + trimmed
                             },
                             reasoningEffort = selectedReasoningEffort,
@@ -391,16 +392,17 @@ class MainActivity : ComponentActivity() {
                             baseUrl = apiBaseUrl,
                             model = selectedModel,
                             description = if (append) {
-                                "$contextInstruction" +
+                                "$browserDescription" +
                                     "This is an additional step for the currently running browser task. " +
                                     "Return only the new actions to append; do not repeat existing actions. " +
                                     trimmed
                             } else {
-                                "$contextInstruction" +
+                                "$browserDescription" +
                                     "Create a replacement task plan for the browser. " + trimmed
                             },
                             reasoningEffort = selectedReasoningEffort,
-                            phoneControlEnabled = phoneControlEnabled
+                            phoneControlEnabled = phoneControlEnabled,
+                            screenImageDataUrl = screenImageDataUrl
                         )
                     }
                     val plan = parseDevicePlan(response)
