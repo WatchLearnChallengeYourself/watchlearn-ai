@@ -9,7 +9,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -32,10 +34,15 @@ class InAppBrowserActivity : ComponentActivity() {
     private lateinit var addressBar: EditText
     private lateinit var progressBar: ProgressBar
     private lateinit var taskStatusText: TextView
-    private lateinit var pauseButton: Button
-    private lateinit var resumeButton: Button
-    private lateinit var retryButton: Button
+    private lateinit var taskEditor: EditText
+    private lateinit var taskEditorContainer: LinearLayout
+    private lateinit var planPreview: TextView
+    private lateinit var approvePlanButton: Button
+    private lateinit var cancelPlanButton: Button
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingPlan: DevicePlan? = null
+    private var pendingPlanIsAppend = false
+    private var bridgeMessage = ""
     private val statusHandler = Handler(Looper.getMainLooper())
 
     private val statusPoller = object : Runnable {
@@ -110,6 +117,18 @@ class InAppBrowserActivity : ComponentActivity() {
         root.addView(browserFrame, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
 
+        BrowserTaskBridge.registerBrowserListeners(
+            planListener = { plan, append ->
+                runOnUiThread { showPlanForApproval(plan, append) }
+            },
+            messageListener = { message ->
+                runOnUiThread {
+                    bridgeMessage = message
+                    updateTaskPanel()
+                }
+            }
+        )
+
         configureWebView()
 
         val initialUrl = intent?.dataString
@@ -140,7 +159,7 @@ class InAppBrowserActivity : ComponentActivity() {
             setTextColor(Color.WHITE)
             textSize = 13f
             maxLines = 3
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
         }
         panel.addView(taskStatusText, LinearLayout.LayoutParams(-1, -2))
 
@@ -155,32 +174,27 @@ class InAppBrowserActivity : ComponentActivity() {
                 setOnClickListener { action() }
             }
 
-        pauseButton = controlButton("Pause") {
+        val pauseButton = controlButton("Pause") {
             if (!WatchLearnAccessibilityService.pauseApproved()) {
                 showTaskToast("No running task to pause.")
             }
             updateTaskPanel()
         }
-        resumeButton = controlButton("Resume") {
+        val resumeButton = controlButton("Resume") {
             if (!WatchLearnAccessibilityService.resumeApproved()) {
                 showTaskToast("No paused task to resume.")
             }
             updateTaskPanel()
         }
         val editButton = controlButton("Edit/Add") {
-            startActivity(
-                Intent(this, MainActivity::class.java).apply {
-                    putExtra(EXTRA_OPEN_TASK_EDITOR, true)
-                    putExtra(
-                        EXTRA_TASK_EDITOR_HINT,
-                        "Edit the task or add the next step, then tap Run task now or Edit or add to running task."
-                    )
-                }
-            )
+            taskEditorContainer.visibility =
+                if (taskEditorContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            if (taskEditorContainer.visibility == View.VISIBLE) taskEditor.requestFocus()
         }
-        retryButton = controlButton("Retry") {
+        val retryButton = controlButton("Retry") {
             val started = WatchLearnAccessibilityService.retryApproved { success, message ->
                 if (!success) showTaskToast(message)
+                bridgeMessage = message
                 updateTaskPanel()
             }
             if (!started) showTaskToast("There is no saved phone task to retry.")
@@ -191,17 +205,122 @@ class InAppBrowserActivity : ComponentActivity() {
             controls.addView(button, LinearLayout.LayoutParams(0, -2, 1f))
         }
         panel.addView(controls, LinearLayout.LayoutParams(-1, -2))
+
+        taskEditorContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 6, 0, 0)
+        }
+        taskEditor = EditText(this).apply {
+            hint = "Edit the task or add a new step"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.LTGRAY)
+            minLines = 2
+            maxLines = 3
+            gravity = Gravity.TOP
+        }
+        taskEditorContainer.addView(taskEditor, LinearLayout.LayoutParams(-1, -2))
+
+        val editorButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        editorButtons.addView(controlButton("Add step") {
+            submitBrowserTask(append = true)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        editorButtons.addView(controlButton("Run edited") {
+            submitBrowserTask(append = false)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        taskEditorContainer.addView(editorButtons, LinearLayout.LayoutParams(-1, -2))
+
+        planPreview = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            maxLines = 5
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            setPadding(0, 6, 0, 0)
+        }
+        taskEditorContainer.addView(planPreview, LinearLayout.LayoutParams(-1, -2))
+
+        val planButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        approvePlanButton = controlButton("Approve plan") {
+            val plan = pendingPlan
+            if (plan != null) {
+                pendingPlan = null
+                approvePlanButton.visibility = View.GONE
+                cancelPlanButton.visibility = View.GONE
+                planPreview.visibility = View.GONE
+                BrowserTaskBridge.approvePlan(plan, pendingPlanIsAppend)
+                bridgeMessage = "Sending the approved browser plan..."
+                updateTaskPanel()
+            }
+        }
+        cancelPlanButton = controlButton("Cancel") {
+            pendingPlan = null
+            approvePlanButton.visibility = View.GONE
+            cancelPlanButton.visibility = View.GONE
+            planPreview.visibility = View.GONE
+            bridgeMessage = "Browser plan cancelled."
+            updateTaskPanel()
+        }
+        planButtons.addView(approvePlanButton, LinearLayout.LayoutParams(0, -2, 1f))
+        planButtons.addView(cancelPlanButton, LinearLayout.LayoutParams(0, -2, 1f))
+        taskEditorContainer.addView(planButtons, LinearLayout.LayoutParams(-1, -2))
+        approvePlanButton.visibility = View.GONE
+        cancelPlanButton.visibility = View.GONE
+
+        panel.addView(taskEditorContainer, LinearLayout.LayoutParams(-1, -2))
         return panel
     }
 
+    private fun submitBrowserTask(append: Boolean) {
+        val instruction = taskEditor.text.toString().trim()
+        if (instruction.isBlank()) {
+            showTaskToast("Enter an instruction first.")
+            return
+        }
+        bridgeMessage = if (append) {
+            "Sending the new step to the AI..."
+        } else {
+            "Sending the edited task to the AI..."
+        }
+        updateTaskPanel()
+        BrowserTaskBridge.submitTask(instruction, append)
+    }
+
+    private fun showPlanForApproval(plan: DevicePlan, append: Boolean) {
+        pendingPlan = plan
+        pendingPlanIsAppend = append
+        planPreview.text = formatDevicePlan(plan)
+        planPreview.visibility = View.VISIBLE
+        approvePlanButton.visibility = View.VISIBLE
+        cancelPlanButton.visibility = View.VISIBLE
+        taskEditorContainer.visibility = View.VISIBLE
+        bridgeMessage = "Review the plan below, then approve it without leaving the browser."
+        updateTaskPanel()
+    }
+
     private fun updateTaskPanel() {
-        val status = WatchLearnAccessibilityService.currentStatus()
-        taskStatusText.text = "AI task: $status"
         val running = WatchLearnAccessibilityService.isRunning()
         val paused = WatchLearnAccessibilityService.isPaused()
-        pauseButton.isEnabled = running && !paused
-        resumeButton.isEnabled = running && paused
-        retryButton.isEnabled = !running && WatchLearnAccessibilityService.hasSavedTask()
+        val status = if (running || bridgeMessage.isBlank()) {
+            WatchLearnAccessibilityService.currentStatus()
+        } else {
+            bridgeMessage
+        }
+        taskStatusText.text = "AI task: " + status
+        taskEditorContainer.let { container ->
+            if (container.visibility == View.VISIBLE) {
+                taskEditor.isEnabled = pendingPlan == null
+            }
+        }
+        // The task buttons are the first four children in the compact row.
+        val controls = (taskStatusText.parent as LinearLayout).getChildAt(1) as LinearLayout
+        controls.getChildAt(0).isEnabled = running && !paused
+        controls.getChildAt(1).isEnabled = running && paused
+        controls.getChildAt(3).isEnabled = !running && WatchLearnAccessibilityService.hasSavedTask()
     }
 
     private fun showTaskToast(message: String) {
@@ -220,7 +339,7 @@ class InAppBrowserActivity : ComponentActivity() {
         settings.javaScriptCanOpenWindowsAutomatically = true
         settings.setSupportMultipleWindows(false)
         settings.cacheMode = WebSettings.LOAD_DEFAULT
-        settings.userAgentString = settings.userAgentString + " WatchLearnAI/0.4"
+        settings.userAgentString = settings.userAgentString + " WatchLearnAI/0.5"
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
@@ -335,6 +454,7 @@ class InAppBrowserActivity : ComponentActivity() {
 
     override fun onDestroy() {
         statusHandler.removeCallbacks(statusPoller)
+        BrowserTaskBridge.clearBrowserListeners()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
         webView.stopLoading()
