@@ -118,8 +118,8 @@ private val REASONING_MODE_OPTIONS = listOf("Standard", "Pro")
 private const val DEVICE_ACTION_INSTRUCTIONS = """
 Return only valid JSON with this exact shape:
 {"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
-Allowed action types are launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
-Use launch_app with an app name when the user asks to open an app. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
+Allowed action types are launch_app, open_browser, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
+Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
 When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
 When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching Chrome, opening a URL, opening a project, opening a file picker, or pressing Export when the next control needs time to appear. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For a recording workflow, include the visible proof steps in order: open the requested URL, wait for the page, open the project, import media if the control is visible, place it on the timeline, trim it, open Export, choose the requested free resolution, and wait for the export result. Never claim a file was selected or an export completed if the device did not visibly show it.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
@@ -407,6 +407,20 @@ class MainActivity : ComponentActivity() {
             taskStatus = "Opening official ChatGPT."
         }
 
+        fun openInAppBrowser() {
+            if (!BuildConfig.PERSONAL_SIDELOAD_MODE) {
+                taskStatus = "The in-app browser is available only in personal sideload mode."
+                return
+            }
+            startActivity(
+                Intent().setClassName(
+                    packageName,
+                    "com.watchlearn.ai.InAppBrowserActivity"
+                )
+            )
+            taskStatus = "Opened WatchLearn AI Browser."
+        }
+
         fun shareTaskToChatGPT(description: String) {
             val trimmed = description.trim()
             if (trimmed.isEmpty()) {
@@ -439,7 +453,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.padding(horizontal = 20.dp)
                 )
                 ScrollableTabRow(selectedTabIndex = tab) {
-                    listOf("Chat", "Automations", "Models", "ChatGPT", "Settings").forEachIndexed { index, label ->
+                    (listOf("Chat", "Automations", "Models", "ChatGPT", "Settings") + if (BuildConfig.PERSONAL_SIDELOAD_MODE) listOf("Browser") else emptyList()).forEachIndexed { index, label ->
                         Tab(
                             selected = tab == index,
                             onClick = { tab = index },
@@ -543,7 +557,7 @@ class MainActivity : ComponentActivity() {
                             chatExportLauncher.launch(arrayOf("application/zip", "application/json", "text/*", "*/*"))
                         }
                     )
-                    else -> SettingsScreen(
+                    4 -> SettingsScreen(
                         connectedProvider = connectedProvider,
                         apiBaseUrl = apiBaseUrl,
                         deploymentMode = deploymentMode,
@@ -557,6 +571,10 @@ class MainActivity : ComponentActivity() {
                             connectedProvider = ""
                             taskStatus = "API key disconnected from this session."
                         }
+                    )
+                    5 -> BrowserEntryScreen(
+                        onOpenBrowser = { openInAppBrowser() },
+                        phoneControlEnabled = phoneControlEnabled
                     )
                 }
                 Spacer(Modifier.height(24.dp))
@@ -707,6 +725,35 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun BrowserEntryScreen(
+    onOpenBrowser: () -> Unit,
+    phoneControlEnabled: Boolean
+) {
+    Column(
+        Modifier.padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("In-app browser", style = MaterialTheme.typography.titleLarge)
+        if (phoneControlEnabled) {
+            Text(
+                "Use a normal browser inside WatchLearn AI. It supports website navigation, JavaScript, cookies, file uploads, downloads, and browser back/forward controls. The personal Accessibility Service can also interact with visible webpage controls after you approve an AI task."
+            )
+            Button(onClick = onOpenBrowser) {
+                Text("Open WatchLearn Browser")
+            }
+            Text(
+                "For AI tasks, ask: “Open the WatchLearn AI Browser and go to a website.” Then review and approve the proposed actions.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        } else {
+            Text(
+                "The in-app browser is disabled in Play Store mode. Use the personal sideload build for this feature."
+            )
         }
     }
 }
