@@ -119,9 +119,9 @@ private const val DEVICE_ACTION_INSTRUCTIONS = """
 Return only valid JSON with this exact shape:
 {"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
 Allowed action types are launch_app, open_browser, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
-Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
+Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known. For a webpage button, use tap_text with the exact visible button label or tap_content_description with the exact accessible label; do not guess coordinates when a visible label is available. The accessibility executor searches visible text, content descriptions, hints, clickable parents, and button bounds.
 When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
-When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching a browser, opening a URL, opening a file picker, or pressing a button when the next control needs time to appear. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For websites and surveys, inspect the visible screen context before choosing controls, use the exact visible labels or content descriptions, scroll when needed, and verify each field after typing. For Prime Opinion or similar surveys, use only verified truthful user information, never invent answers or bypass screening, CAPTCHA, anti-bot, or security checks, and stop for the user when information is unknown or a protected step appears. Do not claim a survey was completed unless the final result is visibly shown.
+When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching a browser, opening a URL, opening a file picker, or pressing a button when the next control needs time to appear. If the user says the WatchLearn AI Browser is already open, never add open_browser, launch_app for WatchLearn AI Browser, or an unnecessary open_url before a button action; interact with the current page. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For websites and surveys, inspect the visible screen context before choosing controls, use the exact visible labels or content descriptions, scroll when needed, and verify each field after typing. For Prime Opinion or similar surveys, use only verified truthful user information, never invent answers or bypass screening, CAPTCHA, anti-bot, or security checks, and stop for the user when information is unknown or a protected step appears. Do not claim a survey was completed unless the final result is visibly shown.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
 Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
 """
@@ -324,11 +324,13 @@ class MainActivity : ComponentActivity() {
                             accessToken = chatGptSession!!.accessToken,
                             model = selectedModel,
                             description = if (append) {
-                                "This is an additional step for the currently running browser task. " +
+                                "$contextInstruction" +
+                                    "This is an additional step for the currently running browser task. " +
                                     "Return only the new actions to append; do not repeat existing actions. " +
                                     trimmed
                             } else {
-                                "Create a replacement task plan for the browser. " + trimmed
+                                "$contextInstruction" +
+                                    "Create a replacement task plan for the browser. " + trimmed
                             },
                             reasoningEffort = selectedReasoningEffort,
                             reasoningMode = selectedReasoningMode,
@@ -340,26 +342,45 @@ class MainActivity : ComponentActivity() {
                             baseUrl = apiBaseUrl,
                             model = selectedModel,
                             description = if (append) {
-                                "This is an additional step for the currently running browser task. " +
+                                "$contextInstruction" +
+                                    "This is an additional step for the currently running browser task. " +
                                     "Return only the new actions to append; do not repeat existing actions. " +
                                     trimmed
                             } else {
-                                "Create a replacement task plan for the browser. " + trimmed
+                                "$contextInstruction" +
+                                    "Create a replacement task plan for the browser. " + trimmed
                             },
                             reasoningEffort = selectedReasoningEffort,
                             phoneControlEnabled = phoneControlEnabled
                         )
                     }
                     val plan = parseDevicePlan(response)
-                    if (plan == null || plan.actions.isEmpty()) {
+                    val safePlan = plan?.let { candidate ->
+                        if (BrowserTaskBridge.isBrowserActive()) {
+                            candidate.copy(
+                                actions = candidate.actions.filterNot { action ->
+                                    action.type == "open_browser" ||
+                                        (
+                                            action.type in setOf("launch_app", "open_app") &&
+                                                action.packageName
+                                                    .ifBlank { action.text }
+                                                    .contains("WatchLearn", ignoreCase = true)
+                                        )
+                                }
+                            )
+                        } else {
+                            candidate
+                        }
+                    }
+                    if (safePlan == null || safePlan.actions.isEmpty()) {
                         BrowserTaskBridge.publishMessage(
                             "The AI did not return usable browser actions. " +
                                 response.take(240)
                         )
                     } else {
-                        taskOutput = formatDevicePlan(plan)
+                        taskOutput = formatDevicePlan(safePlan)
                         taskStatus = "Browser plan ready for your approval."
-                        BrowserTaskBridge.publishPlan(plan, append)
+                        BrowserTaskBridge.publishPlan(safePlan, append)
                     }
                 } catch (error: Exception) {
                     val reason = error.message ?: "The AI request failed."
