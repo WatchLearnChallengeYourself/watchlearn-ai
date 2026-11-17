@@ -9,6 +9,7 @@ object BrowserTaskBridge {
     private var approvalHandler: ((DevicePlan, Boolean) -> Unit)? = null
     private var planListener: ((DevicePlan, Boolean) -> Unit)? = null
     private var messageListener: ((String) -> Unit)? = null
+    private var browserController: ((String) -> Boolean)? = null
 
     fun registerTaskHandlers(
         requestHandler: (String, Boolean) -> Unit,
@@ -25,6 +26,23 @@ object BrowserTaskBridge {
         this.planListener = planListener
         this.messageListener = messageListener
     }
+
+    /**
+     * Lets the accessibility executor reuse the currently visible in-app browser
+     * instead of starting a second Activity for every browser action.
+     */
+    fun registerBrowserController(controller: (String) -> Boolean) {
+        browserController = controller
+    }
+
+    fun clearBrowserController() {
+        browserController = null
+    }
+
+    fun reuseCurrentBrowser(requestedUrl: String): Boolean =
+        browserController?.invoke(requestedUrl) == true
+
+    fun isBrowserActive(): Boolean = browserController != null
 
     fun clearTaskHandlers() {
         requestHandler = null
