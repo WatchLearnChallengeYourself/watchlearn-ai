@@ -3,7 +3,6 @@ package com.watchlearn.ai
 import android.app.Activity
 import android.content.ContentResolver
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -49,7 +48,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -121,18 +119,10 @@ Return only valid JSON with this exact shape:
 Allowed action types are launch_app, open_browser, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
 Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known.
 When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
-When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching Chrome, opening a URL, opening a project, opening a file picker, or pressing Export when the next control needs time to appear. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For a recording workflow, include the visible proof steps in order: open the requested URL, wait for the page, open the project, import media if the control is visible, place it on the timeline, trim it, open Export, choose the requested free resolution, and wait for the export result. Never claim a file was selected or an export completed if the device did not visibly show it.
+When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching a browser, opening a URL, opening a file picker, or pressing a button when the next control needs time to appear. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For websites and surveys, inspect the visible screen context before choosing controls, use the exact visible labels or content descriptions, scroll when needed, and verify each field after typing. For Prime Opinion or similar surveys, use only verified truthful user information, never invent answers or bypass screening, CAPTCHA, anti-bot, or security checks, and stop for the user when information is unknown or a protected step appears. Do not claim a survey was completed unless the final result is visibly shown.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
 Never include password, payment, account deletion, message sending, or other sensitive/destructive actions without clearly listing them in actions for the user to review.
 """
-
-private const val CLIPCHAMP_RECORDING_TASK =
-    "Open Chrome and go to https://app.clipchamp.com/. Wait 3 seconds for the page. " +
-        "Open a new Clipchamp video project. Wait 3 seconds. Tap Import media and let me choose " +
-        "one harmless 10-second sample clip if a file picker appears. Wait 2 seconds. Place the clip " +
-        "on the timeline. Wait 2 seconds. Trim about one second from the beginning. Wait 2 seconds. " +
-        "Open Export, choose the highest free resolution shown up to 1080p, and wait 3 seconds for " +
-        "the export result. Do not claim a file was selected or exported unless it is visibly shown."
 
 private const val PLAY_STORE_ACTION_INSTRUCTIONS = """
 Return a normal helpful response. This Play Store build does not have phone-control actions enabled and must not return launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, or wait actions.
@@ -161,7 +151,6 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun WatchLearnApp() {
         var tab by remember { mutableIntStateOf(0) }
-        var showRecordingConsent by remember { mutableStateOf(false) }
         var showKeyDialog by remember { mutableStateOf(false) }
         var showAutomationDialog by remember { mutableStateOf(false) }
         var apiKey by rememberSaveable { mutableStateOf("") }
@@ -175,6 +164,7 @@ class MainActivity : ComponentActivity() {
         var selectedReasoningMode by rememberSaveable { mutableStateOf("Standard") }
         var isRefreshingModels by remember { mutableStateOf(false) }
         var taskStatus by rememberSaveable { mutableStateOf("Ready for a task.") }
+        var lastTaskDescription by rememberSaveable { mutableStateOf("") }
         var taskOutput by rememberSaveable { mutableStateOf("") }
         var pendingDevicePlan by remember { mutableStateOf<DevicePlan?>(null) }
         var showActionApproval by remember { mutableStateOf(false) }
@@ -219,21 +209,6 @@ class MainActivity : ComponentActivity() {
             chatGptSession = chatGptAuth.loadSession()
         }
 
-        val projectionLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                val intent = Intent(this@MainActivity, ScreenRecordingService::class.java).apply {
-                    putExtra(ScreenRecordingService.EXTRA_RESULT_CODE, result.resultCode)
-                    putExtra(ScreenRecordingService.EXTRA_RESULT_DATA, result.data)
-                }
-                ContextCompat.startForegroundService(this@MainActivity, intent)
-                taskStatus = "Screen recording started for the approved task."
-            } else {
-                taskStatus = "Screen recording was cancelled."
-            }
-        }
-
         fun runTask(description: String) {
             val trimmed = description.trim()
             if (trimmed.isEmpty()) {
@@ -241,6 +216,7 @@ class MainActivity : ComponentActivity() {
                 taskOutput = ""
                 return
             }
+            lastTaskDescription = trimmed
             if (apiKey.isBlank() && chatGptSession == null) {
                 taskStatus = "Connect ChatGPT or an API key before running this task."
                 taskOutput = "Open the ChatGPT tab and choose Continue with ChatGPT, or connect an API key in Settings."
@@ -301,6 +277,15 @@ class MainActivity : ComponentActivity() {
                     taskOutput = error.message ?: "OpenAI request failed."
                 }
             }
+        }
+
+        fun retryLastTask() {
+            if (lastTaskDescription.isBlank()) {
+                taskStatus = "There is no previous task to retry."
+                return
+            }
+            taskStatus = "Retrying the last task with the same instructions..."
+            runTask(lastTaskDescription)
         }
 
         fun addToRunningTask(description: String) {
@@ -467,8 +452,8 @@ class MainActivity : ComponentActivity() {
                         selectedReasoningEffort = selectedReasoningEffort,
                         taskStatus = taskStatus,
                         taskOutput = taskOutput,
-                        onPlanTask = { runTask(it) },
                         onRunTask = { runTask(it) },
+                        onRetryTask = { retryLastTask() },
                         onPauseTask = {
                             taskStatus = if (WatchLearnAccessibilityService.pauseApproved()) {
                                 "Task paused. Nothing else will run until you tap Resume task."
@@ -485,16 +470,6 @@ class MainActivity : ComponentActivity() {
                         },
                         onAddTask = { addToRunningTask(it) },
                         onShareToChatGPT = { shareTaskToChatGPT(it) },
-                        onRecord = { showRecordingConsent = true },
-                        onStopRecording = {
-                            startService(
-                                Intent(
-                                    this@MainActivity,
-                                    ScreenRecordingService::class.java
-                                ).setAction(ScreenRecordingService.ACTION_STOP)
-                            )
-                            taskStatus = "Stop recording requested."
-                        },
                         onAccessibility = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                             taskStatus = "Android accessibility settings opened."
@@ -587,27 +562,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (showRecordingConsent) {
-            AlertDialog(
-                onDismissRequest = { showRecordingConsent = false },
-                title = { Text("Allow screen recording?") },
-                text = {
-                    Text(
-                        "WatchLearn AI will record the selected screen while the approved task runs. Android will show its own recording permission prompt and a persistent recording indicator. You can stop it at any time."
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showRecordingConsent = false
-                        val manager = getSystemService(MediaProjectionManager::class.java)
-                        projectionLauncher.launch(manager.createScreenCaptureIntent())
-                    }) { Text("Continue") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showRecordingConsent = false }) { Text("Cancel") }
-                }
-            )
-        }
         if (showKeyDialog) {
             ApiKeyDialog(
                 onDismiss = { showKeyDialog = false },
@@ -764,14 +718,12 @@ private fun ChatScreen(
     selectedReasoningEffort: String,
     taskStatus: String,
     taskOutput: String,
-    onPlanTask: (String) -> Unit,
     onRunTask: (String) -> Unit,
+    onRetryTask: () -> Unit,
     onPauseTask: () -> Unit,
     onResumeTask: () -> Unit,
     onAddTask: (String) -> Unit,
     onShareToChatGPT: (String) -> Unit,
-    onRecord: () -> Unit,
-    onStopRecording: () -> Unit,
     onAccessibility: () -> Unit,
     phoneControlEnabled: Boolean
 ) {
@@ -793,16 +745,13 @@ private fun ChatScreen(
             minLines = 3
         )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { onPlanTask(command) }) { Text("Plan task") }
             Button(onClick = { onRunTask(command) }) { Text("Run task now") }
+            OutlinedButton(
+                onClick = onRetryTask,
+                enabled = command.isNotBlank()
+            ) { Text("Try again") }
         }
         if (phoneControlEnabled) {
-            OutlinedButton(
-                onClick = { command = CLIPCHAMP_RECORDING_TASK },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Load Clipchamp recording timeline")
-            }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = onPauseTask) { Text("Pause task") }
                 OutlinedButton(onClick = onResumeTask) { Text("Resume task") }
@@ -811,28 +760,40 @@ private fun ChatScreen(
                 onClick = { onAddTask(command) },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Add request to running task")
+                Text("Edit or add to running task")
+            }
+            OutlinedButton(onClick = onAccessibility) {
+                Text("Enable Android accessibility")
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("How to use Run Task", style = MaterialTheme.typography.titleSmall)
+                    Text("1. Enter what you want WatchLearn AI to do.")
+                    Text("2. Choose your model and reasoning level in Models.")
+                    Text("3. Tap Run task now.")
+                    Text("4. Review the proposed actions and approve them.")
+                    Text("5. Watch the compact task status panel while it works.")
+                    Text("6. If it fails, read the reason, edit the request, or tap Try again.")
+                    Text("Enable Android Accessibility first for tasks that use other apps.")
+                }
             }
         }
         OutlinedButton(onClick = { onShareToChatGPT(command) }) {
             Text("Send task to ChatGPT")
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = onRecord) { Text("Record approved task") }
-            OutlinedButton(onClick = onStopRecording) { Text("Stop recording") }
-        }
-        if (phoneControlEnabled) {
-            Text(
-                "Recording order: tap Record approved task first and allow Android's system prompt; then tap Run task now, review the plan, and approve it. Android still requires you to choose the sample file in the file picker.",
-                style = MaterialTheme.typography.bodySmall
-            )
-            OutlinedButton(onClick = onAccessibility) {
-                Text("Enable Android accessibility")
-            }
-        }
-        if (taskOutput.isNotBlank()) {
-            Card(Modifier.fillMaxWidth()) {
-                Text(taskOutput, modifier = Modifier.padding(16.dp))
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("Task status", style = MaterialTheme.typography.titleSmall)
+                Text(taskStatus)
+                if (taskOutput.isNotBlank()) {
+                    Text(taskOutput)
+                }
             }
         }
         Text(
