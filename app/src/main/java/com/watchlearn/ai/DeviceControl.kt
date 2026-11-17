@@ -87,6 +87,7 @@ fun formatDevicePlan(plan: DevicePlan): String = buildString {
 
 fun describeDeviceAction(action: DeviceAction): String = when (action.type) {
     "launch_app", "open_app" -> "Open ${action.packageName.ifBlank { action.text.ifBlank { "the app" } }}"
+    "open_browser" -> "Open WatchLearn AI Browser" + action.url.takeIf { it.isNotBlank() }?.let { " at " + it }.orEmpty()
     "open_url" -> "Open ${action.url.ifBlank { action.text }}${action.packageName.takeIf { it.isNotBlank() }?.let { " in $it" } ?: ""}"
     "tap_text" -> "Tap “${action.text}”"
     "tap_content_description" -> "Tap control described as “${action.text}”"
@@ -251,14 +252,21 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private fun runAction(action: DeviceAction): Pair<Boolean, String> {
         return when (action.type) {
             "launch_app", "open_app" -> {
-                val packageName = resolvePackage(action.packageName.ifBlank { action.text })
-                    ?: return false to "Could not find an installed app named “${action.packageName.ifBlank { action.text }}”."
+                val requestedApp = action.packageName.ifBlank { action.text }
+                if (requestedApp.equals("WatchLearn Browser", ignoreCase = true) ||
+                    requestedApp.equals("WatchLearn AI Browser", ignoreCase = true)
+                ) {
+                    return openBrowser(action)
+                }
+                val packageName = resolvePackage(requestedApp)
+                    ?: return false to "Could not find an installed app named “" + requestedApp + "”. "
                 val launchIntent = launchIntentForPackage(packageName)
-                    ?: return false to "The app is installed but has no launchable activity: $packageName"
+                    ?: return false to "The app is installed but has no launchable activity: " + packageName
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(launchIntent)
-                true to "Opened $packageName"
+                true to "Opened " + packageName
             }
+            "open_browser" -> openBrowser(action)
             "open_url" -> openUrl(action)
             "tap_text" -> tapText(action.text)
             "tap_content_description" -> tapContentDescription(action.text)
@@ -282,7 +290,29 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS) to "Opened Recents"
             "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS) to "Opened notifications"
             "wait" -> true to "Waiting"
-            else -> false to "Unsupported phone action: ${action.type}"
+            else -> false to "Unsupported phone action: " + action.type
+        }
+    }
+
+    private fun openBrowser(action: DeviceAction): Pair<Boolean, String> {
+        val requestedUrl = action.url.ifBlank { action.text }.trim()
+        val intent = if (requestedUrl.isBlank()) {
+            Intent(Intent.ACTION_MAIN)
+        } else {
+            val normalizedUrl = if (
+                requestedUrl.startsWith("https://", ignoreCase = true) ||
+                requestedUrl.startsWith("http://", ignoreCase = true)
+            ) requestedUrl else "https://" + requestedUrl
+            Intent(Intent.ACTION_VIEW, Uri.parse(normalizedUrl))
+        }.apply {
+            setClassName("com.watchlearn.ai", "com.watchlearn.ai.InAppBrowserActivity")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            startActivity(intent)
+            true to "Opened WatchLearn AI Browser"
+        }.getOrElse {
+            false to "The personal in-app browser is not included in this build."
         }
     }
 
@@ -478,7 +508,9 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "whatsapp" to "com.whatsapp",
             "facebook" to "com.facebook.katana",
             "instagram" to "com.instagram.android",
-            "tiktok" to "com.zhiliaoapp.musically"
+            "tiktok" to "com.zhiliaoapp.musically",
+            "watchlearn browser" to "com.watchlearn.ai",
+            "watchlearn ai browser" to "com.watchlearn.ai"
         )
         known[value.lowercase(Locale.US)]?.let {
             if (launchableApps.any { app -> app.packageName == it }) return it
