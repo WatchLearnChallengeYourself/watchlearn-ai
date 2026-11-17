@@ -238,6 +238,16 @@ class MainActivity : ComponentActivity() {
             chatGptSession = chatGptAuth.loadSession()
         }
 
+        fun captureAndPlan(onReady: (String?, String) -> Unit) {
+            val uiContext = WatchLearnAccessibilityService.currentUiContext()
+            val captureStarted = WatchLearnAccessibilityService.captureCurrentScreen { bitmap, _ ->
+                val image = bitmap?.let(::bitmapToDataUrl)
+                bitmap?.recycle()
+                onReady(image, uiContext)
+            }
+            if (!captureStarted) onReady(null, uiContext)
+        }
+
         fun runTask(description: String) {
             val trimmed = description.trim()
             if (trimmed.isEmpty()) {
@@ -258,16 +268,20 @@ class MainActivity : ComponentActivity() {
                 "Running task with $selectedModel ($selectedReasoningEffort)..."
             }
             taskOutput = ""
-            scope.launch {
+            captureAndPlan { screenImageDataUrl, uiContext ->
+                val planningDescription =
+                    trimmed + "\n\nCurrent accessibility context:\n" + uiContext
+                scope.launch {
                 try {
                     val response = if (chatGptSession != null) {
                         requestChatGptPlan(
                             accessToken = chatGptSession!!.accessToken,
                             model = selectedModel,
-                            description = trimmed,
+                            description = planningDescription,
                             reasoningEffort = selectedReasoningEffort,
                             reasoningMode = selectedReasoningMode,
-                            phoneControlEnabled = phoneControlEnabled
+                            phoneControlEnabled = phoneControlEnabled,
+                            screenImageDataUrl = screenImageDataUrl
                         )
                     } else {
                         requestTaskPlan(
@@ -306,8 +320,8 @@ class MainActivity : ComponentActivity() {
                     taskOutput = error.message ?: "OpenAI request failed."
                 }
             }
+            }
         }
-
         fun retryLastTask() {
             if (lastTaskDescription.isBlank()) {
                 taskStatus = "There is no previous task to retry."
@@ -348,14 +362,17 @@ class MainActivity : ComponentActivity() {
                 "The user is already on the current webpage inside the WatchLearn AI Browser. " +
                     "Do not open, relaunch, reload, or restart the browser for this edit. " +
                     "Use the current visible page and interact with its visible controls. "
-            scope.launch {
+            captureAndPlan { screenImageDataUrl, uiContext ->
+                val browserDescription =
+                    contextInstruction + "\nCurrent accessibility context:\n" + uiContext
+                scope.launch {
                 try {
                     val response = if (chatGptSession != null) {
                         requestChatGptPlan(
                             accessToken = chatGptSession!!.accessToken,
                             model = selectedModel,
                             description = if (append) {
-                                "$contextInstruction" +
+                                browserDescription +
                                     "This is an additional step for the currently running browser task. " +
                                     "Return only the new actions to append; do not repeat existing actions. " +
                                     trimmed
@@ -365,7 +382,8 @@ class MainActivity : ComponentActivity() {
                             },
                             reasoningEffort = selectedReasoningEffort,
                             reasoningMode = selectedReasoningMode,
-                            phoneControlEnabled = phoneControlEnabled
+                            phoneControlEnabled = phoneControlEnabled,
+                            screenImageDataUrl = screenImageDataUrl
                         )
                     } else {
                         requestTaskPlan(
@@ -419,8 +437,8 @@ class MainActivity : ComponentActivity() {
                     BrowserTaskBridge.publishMessage("Task planning failed: " + reason)
                 }
             }
+            }
         }
-
         fun approveBrowserPlan(plan: DevicePlan, append: Boolean) {
             if (append) {
                 val added = WatchLearnAccessibilityService.appendApproved(plan.actions)
