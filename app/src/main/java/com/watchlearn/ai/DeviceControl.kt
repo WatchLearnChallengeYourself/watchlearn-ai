@@ -112,6 +112,9 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private var nextActionIndex = 0
     private var completionCallback: ((Boolean, String) -> Unit)? = null
     private var executionGeneration = 0L
+    private var lastApprovedActions: List<DeviceAction> = emptyList()
+    @Volatile private var actionStatus = "No approved task is running."
+    @Volatile private var failureReason = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -134,9 +137,12 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 return@post
             }
             queuedActions = actions.toMutableList()
+            lastApprovedActions = actions.toList()
             nextActionIndex = 0
             paused = false
             running = true
+            failureReason = ""
+            actionStatus = "Preparing the approved task..."
             executionGeneration += 1
             completionCallback = callback
             continueExecution()
@@ -147,6 +153,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         if (!running) return false
         handler.post {
             paused = true
+            actionStatus = "Task paused."
             executionGeneration += 1
         }
         return true
@@ -156,6 +163,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         if (!running) return false
         handler.post {
             paused = false
+            actionStatus = "Resuming the task..."
             executionGeneration += 1
             continueExecution()
         }
@@ -165,7 +173,10 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     fun appendTask(actions: List<DeviceAction>): Boolean {
         if (!running || actions.isEmpty()) return false
         handler.post {
-            if (running) queuedActions.addAll(actions)
+            if (running) {
+                queuedActions.addAll(actions)
+                actionStatus = "Added " + actions.size + " action(s) to the running task."
+            }
         }
         return true
     }
@@ -186,6 +197,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             return
         }
         val action = queuedActions[nextActionIndex]
+        actionStatus = "Doing: " + describeDeviceAction(action)
         val generation = executionGeneration
         runActionWithRetry(action, 0, generation) { result ->
             if (!running) return@runActionWithRetry
@@ -195,7 +207,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             }
             nextActionIndex += 1
             val delay = when (action.type) {
-                "launch_app", "open_app", "open_url", "back", "home", "recents", "notifications" -> 1_200L
+                "launch_app", "open_app", "open_browser", "open_url", "back", "home", "recents", "notifications" -> 1_200L
                 "wait" -> action.durationMs.coerceIn(0L, 30_000L)
                 else -> 500L
             }
@@ -210,6 +222,8 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         running = false
         paused = false
         executionGeneration += 1
+        actionStatus = if (success) message else "Failed: " + message
+        failureReason = if (success) "" else message
         queuedActions.clear()
         nextActionIndex = 0
         val callback = completionCallback
@@ -584,6 +598,27 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         fun isRunning(): Boolean = instance?.running == true
 
         fun isPaused(): Boolean = instance?.paused == true
+
+        fun currentStatus(): String =
+            instance?.actionStatus ?: "Accessibility service is not enabled."
+
+        fun lastFailureReason(): String = instance?.failureReason.orEmpty()
+
+        fun hasSavedTask(): Boolean = instance?.lastApprovedActions?.isNotEmpty() == true
+
+        fun retryApproved(callback: (Boolean, String) -> Unit): Boolean {
+            val service = instance ?: return false
+            service.handler.post {
+                if (service.running) {
+                    callback(false, "A task is already running.")
+                } else if (service.lastApprovedActions.isEmpty()) {
+                    callback(false, "There is no saved phone task to retry.")
+                } else {
+                    service.execute(service.lastApprovedActions, callback)
+                }
+            }
+            return true
+        }
 
         fun isEnabled(service: android.content.Context): Boolean {
             val expected = "${service.packageName}/${WatchLearnAccessibilityService::class.java.name}"
