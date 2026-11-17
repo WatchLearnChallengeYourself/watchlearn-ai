@@ -36,6 +36,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -43,6 +44,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -288,6 +290,112 @@ class MainActivity : ComponentActivity() {
             runTask(lastTaskDescription)
         }
 
+        fun planBrowserTask(description: String, append: Boolean) {
+            val trimmed = description.trim()
+            if (trimmed.isEmpty()) {
+                BrowserTaskBridge.publishMessage("Enter an instruction before submitting it.")
+                return
+            }
+            if (!phoneControlEnabled) {
+                BrowserTaskBridge.publishMessage("Browser task editing is available only in personal sideload mode.")
+                return
+            }
+            if (append && !WatchLearnAccessibilityService.isRunning()) {
+                BrowserTaskBridge.publishMessage("There is no running task to add to. Start and approve a task first.")
+                return
+            }
+            if (!append && WatchLearnAccessibilityService.isRunning()) {
+                BrowserTaskBridge.publishMessage("A task is already running. Add this instruction to it or wait until it finishes.")
+                return
+            }
+            if (apiKey.isBlank() && chatGptSession == null) {
+                BrowserTaskBridge.publishMessage("Connect ChatGPT or an API key in WatchLearn AI before editing a browser task.")
+                return
+            }
+
+            BrowserTaskBridge.publishMessage(
+                if (append) "Planning the new step to add to the running task..."
+                else "Planning the edited browser task..."
+            )
+            scope.launch {
+                try {
+                    val response = if (chatGptSession != null) {
+                        requestChatGptPlan(
+                            accessToken = chatGptSession!!.accessToken,
+                            model = selectedModel,
+                            description = if (append) {
+                                "This is an additional step for the currently running browser task. " +
+                                    "Return only the new actions to append; do not repeat existing actions. " +
+                                    trimmed
+                            } else {
+                                "Create a replacement task plan for the browser. " + trimmed
+                            },
+                            reasoningEffort = selectedReasoningEffort,
+                            reasoningMode = selectedReasoningMode,
+                            phoneControlEnabled = phoneControlEnabled
+                        )
+                    } else {
+                        requestTaskPlan(
+                            apiKey = apiKey,
+                            baseUrl = apiBaseUrl,
+                            model = selectedModel,
+                            description = if (append) {
+                                "This is an additional step for the currently running browser task. " +
+                                    "Return only the new actions to append; do not repeat existing actions. " +
+                                    trimmed
+                            } else {
+                                "Create a replacement task plan for the browser. " + trimmed
+                            },
+                            reasoningEffort = selectedReasoningEffort,
+                            phoneControlEnabled = phoneControlEnabled
+                        )
+                    }
+                    val plan = parseDevicePlan(response)
+                    if (plan == null || plan.actions.isEmpty()) {
+                        BrowserTaskBridge.publishMessage(
+                            "The AI did not return usable browser actions. " +
+                                response.take(240)
+                        )
+                    } else {
+                        taskOutput = formatDevicePlan(plan)
+                        taskStatus = "Browser plan ready for your approval."
+                        BrowserTaskBridge.publishPlan(plan, append)
+                    }
+                } catch (error: Exception) {
+                    val reason = error.message ?: "The AI request failed."
+                    taskStatus = "Browser task planning failed: " + reason
+                    BrowserTaskBridge.publishMessage("Task planning failed: " + reason)
+                }
+            }
+        }
+
+        fun approveBrowserPlan(plan: DevicePlan, append: Boolean) {
+            if (append) {
+                val added = WatchLearnAccessibilityService.appendApproved(plan.actions)
+                val message = if (added) {
+                    "Added the approved steps to the running browser task."
+                } else {
+                    "The running task ended before the new steps could be added."
+                }
+                taskStatus = message
+                BrowserTaskBridge.publishMessage(message)
+            } else {
+                val started = WatchLearnAccessibilityService.executeApproved(plan.actions) { success, message ->
+                    taskStatus = if (success) message else "Browser task failed: " + message
+                    BrowserTaskBridge.publishMessage(
+                        if (success) message else "Task failed: " + message
+                    )
+                }
+                val message = if (started) {
+                    "Approved. The browser task is now running."
+                } else {
+                    "Android Accessibility is not enabled or another task is already running."
+                }
+                taskStatus = message
+                BrowserTaskBridge.publishMessage(message)
+            }
+        }
+
         fun addToRunningTask(description: String) {
             val trimmed = description.trim()
             if (trimmed.isEmpty()) {
@@ -418,6 +526,24 @@ class MainActivity : ComponentActivity() {
             }
             startActivity(Intent.createChooser(shareIntent, "Send task to ChatGPT"))
             taskStatus = "Task ready to send to ChatGPT."
+        }
+
+        val currentBrowserRequestHandler by rememberUpdatedState<(String, Boolean) -> Unit> {
+            { text, append -> planBrowserTask(text, append) }
+        }
+        val currentBrowserApprovalHandler by rememberUpdatedState<(DevicePlan, Boolean) -> Unit> {
+            { plan, append -> approveBrowserPlan(plan, append) }
+        }
+        DisposableEffect(Unit) {
+            BrowserTaskBridge.registerTaskHandlers(
+                requestHandler = { text, append ->
+                    currentBrowserRequestHandler(text, append)
+                },
+                approvalHandler = { plan, append ->
+                    currentBrowserApprovalHandler(plan, append)
+                }
+            )
+            onDispose { BrowserTaskBridge.clearTaskHandlers() }
         }
 
         Scaffold { padding ->
