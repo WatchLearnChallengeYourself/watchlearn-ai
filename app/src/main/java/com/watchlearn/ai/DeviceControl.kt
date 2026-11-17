@@ -422,7 +422,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         val bounds = android.graphics.Rect()
         candidate.getBoundsInScreen(bounds)
         if (bounds.width() > 0 && bounds.height() > 0) {
-            return dispatchTap(bounds.centerX().toFloat(), bounds.centerY().toFloat)
+            return dispatchTap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
         }
         return clicked
     }
