@@ -2,10 +2,14 @@ package com.watchlearn.ai
 
 import android.app.DownloadManager
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
-import android.provider.Settings
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -15,9 +19,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -27,7 +31,19 @@ class InAppBrowserActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var addressBar: EditText
     private lateinit var progressBar: ProgressBar
+    private lateinit var taskStatusText: TextView
+    private lateinit var pauseButton: Button
+    private lateinit var resumeButton: Button
+    private lateinit var retryButton: Button
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private val statusHandler = Handler(Looper.getMainLooper())
+
+    private val statusPoller = object : Runnable {
+        override fun run() {
+            updateTaskPanel()
+            statusHandler.postDelayed(this, 500L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,11 +79,11 @@ class InAppBrowserActivity : ComponentActivity() {
             webView.reload()
         }, LinearLayout.LayoutParams(52, -2))
         navigation.addView(navButton("Home") {
-            webView.loadUrl("https://www.google.com")
+            webView.loadUrl(DEFAULT_HOME_URL)
         }, LinearLayout.LayoutParams(76, -2))
 
         addressBar = EditText(this).apply {
-            hint = "Enter a website or search"
+            hint = "Search Google or enter a website link"
             setSingleLine(true)
             setSelectAllOnFocus(false)
             setOnEditorActionListener { _, _, _ ->
@@ -75,10 +91,7 @@ class InAppBrowserActivity : ComponentActivity() {
                 true
             }
         }
-        navigation.addView(
-            addressBar,
-            LinearLayout.LayoutParams(0, -2, 1f)
-        )
+        navigation.addView(addressBar, LinearLayout.LayoutParams(0, -2, 1f))
         navigation.addView(navButton("Go") {
             navigateFromAddressBar()
         }, LinearLayout.LayoutParams(60, -2))
@@ -91,18 +104,108 @@ class InAppBrowserActivity : ComponentActivity() {
         root.addView(progressBar, LinearLayout.LayoutParams(-1, 4))
 
         webView = WebView(this)
-        root.addView(
-            webView,
-            LinearLayout.LayoutParams(-1, 0, 1f)
-        )
+        val browserFrame = FrameLayout(this)
+        browserFrame.addView(webView, FrameLayout.LayoutParams(-1, -1))
+        browserFrame.addView(createTaskPanel(), taskPanelLayoutParams())
+        root.addView(browserFrame, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
 
         configureWebView()
 
         val initialUrl = intent?.dataString
             ?: intent?.getStringExtra(EXTRA_URL)
-            ?: "https://www.google.com"
+            ?: DEFAULT_HOME_URL
         webView.loadUrl(normalizeUrl(initialUrl))
+        statusHandler.post(statusPoller)
+    }
+
+    private fun taskPanelLayoutParams(): FrameLayout.LayoutParams =
+        FrameLayout.LayoutParams(-1, -2).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(12, 0, 12, 12)
+        }
+
+    private fun createTaskPanel(): LinearLayout {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 8, 12, 8)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(225, 30, 30, 34))
+                cornerRadius = 18f
+            }
+        }
+
+        taskStatusText = TextView(this).apply {
+            text = "AI task panel: no approved task is running."
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        panel.addView(taskStatusText, LinearLayout.LayoutParams(-1, -2))
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun controlButton(label: String, action: () -> Unit): Button =
+            Button(this).apply {
+                text = label
+                textSize = 11f
+                setOnClickListener { action() }
+            }
+
+        pauseButton = controlButton("Pause") {
+            if (!WatchLearnAccessibilityService.pauseApproved()) {
+                showTaskToast("No running task to pause.")
+            }
+            updateTaskPanel()
+        }
+        resumeButton = controlButton("Resume") {
+            if (!WatchLearnAccessibilityService.resumeApproved()) {
+                showTaskToast("No paused task to resume.")
+            }
+            updateTaskPanel()
+        }
+        val editButton = controlButton("Edit/Add") {
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    putExtra(EXTRA_OPEN_TASK_EDITOR, true)
+                    putExtra(
+                        EXTRA_TASK_EDITOR_HINT,
+                        "Edit the task or add the next step, then tap Run task now or Edit or add to running task."
+                    )
+                }
+            )
+        }
+        retryButton = controlButton("Retry") {
+            val started = WatchLearnAccessibilityService.retryApproved { success, message ->
+                if (!success) showTaskToast(message)
+                updateTaskPanel()
+            }
+            if (!started) showTaskToast("There is no saved phone task to retry.")
+            updateTaskPanel()
+        }
+
+        listOf(pauseButton, resumeButton, editButton, retryButton).forEach { button ->
+            controls.addView(button, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        panel.addView(controls, LinearLayout.LayoutParams(-1, -2))
+        return panel
+    }
+
+    private fun updateTaskPanel() {
+        val status = WatchLearnAccessibilityService.currentStatus()
+        taskStatusText.text = "AI task: $status"
+        val running = WatchLearnAccessibilityService.isRunning()
+        val paused = WatchLearnAccessibilityService.isPaused()
+        pauseButton.isEnabled = running && !paused
+        resumeButton.isEnabled = running && paused
+        retryButton.isEnabled = !running && WatchLearnAccessibilityService.hasSavedTask()
+    }
+
+    private fun showTaskToast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     private fun configureWebView() {
@@ -180,24 +283,24 @@ class InAppBrowserActivity : ComponentActivity() {
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             runCatching {
                 val request = DownloadManager.Request(Uri.parse(url)).apply {
-                        setMimeType(mimeType)
-                        setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType))
-                        setDescription("Downloading from WatchLearn AI Browser")
-                        setNotificationVisibility(
-                            DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                        )
-                        addRequestHeader("User-Agent", userAgent)
-                        CookieManager.getInstance().getCookie(url)?.let {
-                            addRequestHeader("Cookie", it)
-                        }
-                        setDestinationInExternalPublicDir(
-                            Environment.DIRECTORY_DOWNLOADS,
-                            android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
-                        )
+                    setMimeType(mimeType)
+                    setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType))
+                    setDescription("Downloading from WatchLearn AI Browser")
+                    setNotificationVisibility(
+                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                    )
+                    addRequestHeader("User-Agent", userAgent)
+                    CookieManager.getInstance().getCookie(url)?.let {
+                        addRequestHeader("Cookie", it)
                     }
-                    val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-                    manager.enqueue(request)
-                    Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
+                    setDestinationInExternalPublicDir(
+                        Environment.DIRECTORY_DOWNLOADS,
+                        android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+                    )
+                }
+                val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+                manager.enqueue(request)
+                Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
             }.onFailure {
                 Toast.makeText(this, "Download could not start", Toast.LENGTH_SHORT).show()
             }
@@ -217,8 +320,7 @@ class InAppBrowserActivity : ComponentActivity() {
             return value
         }
         if (value.contains(" ") || !value.contains(".")) {
-            return "https://www.google.com/search?q=" +
-                URLEncoder.encode(value, Charsets.UTF_8.name())
+            return DEFAULT_SEARCH_URL + URLEncoder.encode(value, Charsets.UTF_8.name())
         }
         return "https://$value"
     }
@@ -232,6 +334,7 @@ class InAppBrowserActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        statusHandler.removeCallbacks(statusPoller)
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
         webView.stopLoading()
@@ -241,6 +344,10 @@ class InAppBrowserActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_URL = "watchlearn.browser.url"
+        const val EXTRA_OPEN_TASK_EDITOR = "watchlearn.browser.open_task_editor"
+        const val EXTRA_TASK_EDITOR_HINT = "watchlearn.browser.task_editor_hint"
+        private const val DEFAULT_HOME_URL = "https://www.google.com"
+        private const val DEFAULT_SEARCH_URL = "https://www.google.com/search?q="
         private const val FILE_CHOOSER_REQUEST = 4107
     }
 
