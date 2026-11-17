@@ -317,6 +317,10 @@ class MainActivity : ComponentActivity() {
                 if (append) "Planning the new step to add to the running task..."
                 else "Planning the edited browser task..."
             )
+            val contextInstruction =
+                "The user is already on the current webpage inside the WatchLearn AI Browser. " +
+                    "Do not open, relaunch, reload, or restart the browser for this edit. " +
+                    "Use the current visible page and interact with its visible controls. "
             scope.launch {
                 try {
                     val response = if (chatGptSession != null) {
