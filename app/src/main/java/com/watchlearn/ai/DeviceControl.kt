@@ -4,11 +4,14 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.provider.Settings
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityEvent
@@ -520,6 +523,35 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         return nodes.firstOrNull { it.isEditable }
     }
 
+    private fun visibleUiContext(): String {
+        val root = rootInActiveWindow
+            ?: return "No active accessibility window is available."
+        val entries = allNodes(root)
+            .asSequence()
+            .filter { it.isVisibleToUser && it.isEnabled }
+            .mapNotNull { node ->
+                val label = listOf(
+                    node.text?.toString().orEmpty(),
+                    node.contentDescription?.toString().orEmpty(),
+                    node.hintText?.toString().orEmpty()
+                ).firstOrNull { it.isNotBlank() }?.trim() ?: return@mapNotNull null
+                val bounds = android.graphics.Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.width() <= 0 || bounds.height() <= 0) return@mapNotNull null
+                val className = node.className?.toString().orEmpty().substringAfterLast('.')
+                "- $label | class=$className | clickable=${node.isClickable} | bounds=${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
+            }
+            .distinct()
+            .take(100)
+            .toList()
+        return buildString {
+            append("Active package: ")
+            append(root.packageName?.toString().orEmpty().ifBlank { "unknown" })
+            append("\nVisible accessibility controls:\n")
+            append(if (entries.isEmpty()) "(none exposed)" else entries.joinToString("\n"))
+        }
+    }
+
     private fun allNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val result = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo) {
@@ -633,6 +665,36 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun captureScreen(callback: (Bitmap?, String?) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            callback(null, "Screen capture requires Android 11 or newer.")
+            return
+        }
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    val hardwareBuffer = result.hardwareBuffer
+                    val hardwareBitmap = Bitmap.wrapHardwareBuffer(
+                        hardwareBuffer,
+                        result.colorSpace
+                    )
+                    hardwareBuffer.close()
+                    val bitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                    callback(
+                        bitmap,
+                        if (bitmap == null) "Android returned an empty screenshot." else null
+                    )
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    callback(null, "Android could not capture the current screen (code $errorCode).")
+                }
+            }
+        )
+    }
+
     companion object {
         @Volatile
         private var instance: WatchLearnAccessibilityService? = null
@@ -665,6 +727,23 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             instance?.actionStatus ?: "Accessibility service is not enabled."
 
         fun lastFailureReason(): String = instance?.failureReason.orEmpty()
+
+        fun currentUiContext(): String =
+            instance?.visibleUiContext() ?: "Android Accessibility is not enabled, so no UI controls are available."
+
+        fun captureCurrentScreen(callback: (Bitmap?, String?) -> Unit): Boolean {
+            val service = instance
+            if (service == null) {
+                callback(null, "Android Accessibility is not enabled.")
+                return false
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                callback(null, "Screen understanding requires Android 11 or newer.")
+                return false
+            }
+            service.handler.post { service.captureScreen(callback) }
+            return true
+        }
 
         fun hasSavedTask(): Boolean = instance?.lastApprovedActions?.isNotEmpty() == true
 
