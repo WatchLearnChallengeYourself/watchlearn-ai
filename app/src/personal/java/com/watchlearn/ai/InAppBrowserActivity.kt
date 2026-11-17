@@ -128,6 +128,10 @@ class InAppBrowserActivity : ComponentActivity() {
                 }
             }
         )
+        BrowserTaskBridge.registerBrowserController { requestedUrl ->
+            runOnUiThread { keepCurrentBrowserPage(requestedUrl) }
+            true
+        }
 
         configureWebView()
 
@@ -428,6 +432,24 @@ class InAppBrowserActivity : ComponentActivity() {
         webView.setOnLongClickListener { false }
     }
 
+    private fun keepCurrentBrowserPage(requestedUrl: String) {
+        if (requestedUrl.isBlank()) return
+        val targetUrl = normalizeUrl(requestedUrl)
+        val currentUrl = webView.url.orEmpty()
+        if (currentUrl.isBlank() || currentUrl == "about:blank" || !sameWebsite(currentUrl, targetUrl)) {
+            webView.loadUrl(targetUrl)
+        }
+    }
+
+    private fun sameWebsite(first: String, second: String): Boolean {
+        val firstHost = Uri.parse(first).host.orEmpty().lowercase().removePrefix("www.")
+        val secondHost = Uri.parse(second).host.orEmpty().lowercase().removePrefix("www.")
+        if (firstHost.isBlank() || secondHost.isBlank()) return false
+        return firstHost == secondHost ||
+            firstHost.endsWith("." + secondHost) ||
+            secondHost.endsWith("." + firstHost)
+    }
+
     private fun navigateFromAddressBar() {
         val entered = addressBar.text.toString().trim()
         if (entered.isBlank()) return
@@ -455,6 +477,7 @@ class InAppBrowserActivity : ComponentActivity() {
     override fun onDestroy() {
         statusHandler.removeCallbacks(statusPoller)
         BrowserTaskBridge.clearBrowserListeners()
+        BrowserTaskBridge.clearBrowserController()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
         webView.stopLoading()
