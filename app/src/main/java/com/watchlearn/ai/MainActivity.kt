@@ -1,6 +1,7 @@
 package com.watchlearn.ai
 
 import android.app.Activity
+import android.graphics.Bitmap
 import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
@@ -56,11 +57,37 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.json.JSONArray
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Base64
 import java.util.zip.ZipInputStream
+
+private fun bitmapToDataUrl(bitmap: Bitmap): String? {
+    val output = ByteArrayOutputStream()
+    val scaled = if (bitmap.width > 1280) {
+        val ratio = 1280f / bitmap.width.toFloat()
+        Bitmap.createScaledBitmap(
+            bitmap,
+            1280,
+            (bitmap.height * ratio).toInt().coerceAtLeast(1),
+            true
+        )
+    } else {
+        bitmap
+    }
+    return try {
+        if (!scaled.compress(Bitmap.CompressFormat.JPEG, 70, output)) {
+            null
+        } else {
+            "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(output.toByteArray())
+        }
+    } finally {
+        if (scaled !== bitmap) scaled.recycle()
+    }
+}
 
 private val DEFAULT_OPENAI_MODELS = listOf(
     // Current general-purpose/chat models shown by the OpenAI model catalog.
@@ -119,7 +146,7 @@ private const val DEVICE_ACTION_INSTRUCTIONS = """
 Return only valid JSON with this exact shape:
 {"summary":"short explanation","actions":[{"type":"launch_app","package":"Chrome","label":"Open Chrome"}]}
 Allowed action types are launch_app, open_browser, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, and wait.
-Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known. For a webpage button, use tap_text with the exact visible button label or tap_content_description with the exact accessible label; do not guess coordinates when a visible label is available. The accessibility executor searches visible text, content descriptions, hints, clickable parents, and button bounds.
+Use launch_app with an app name when the user asks to open an app. In personal sideload mode, use open_browser for the WatchLearn AI Browser and include a URL when one was requested. Use open_url with a web address when the user asks to go to a website; include the target app in package when one was requested, for example {"type":"open_url","url":"https://google.com","package":"Chrome","label":"Open Google in Chrome"}. Use tap_text for visible labels, type_text for the currently focused field, and tap/swipe only when exact screen coordinates are known. For a webpage button, use tap_text with the exact visible button label or tap_content_description with the exact accessible label; do not guess coordinates when a visible label is available. The accessibility executor searches visible text, content descriptions, hints, clickable parents, and button bounds. When a current screen image and accessibility context are supplied, use both to identify the exact visible control. If a target is visible in the image but has no accessible label, return a tap action using coordinates measured from the supplied full-screen image. Prefer labeled actions whenever possible.
 When the user asks to search Google for something, prefer one open_url action using https://www.google.com/search?q= followed by the URL-encoded search text, with package set to Chrome when Chrome was requested. For other apps, use tap_text or tap_content_description to focus the field, then type_text with label identifying the field, and tap_text or tap_content_description to press the visible Search/Submit button.
 When a task names both Chrome and a URL, do not return only launch_app: include open_url with package Chrome immediately after it, or use open_url as the first action. Translate every requested step into a separate action. Add wait actions after launching a browser, opening a URL, opening a file picker, or pressing a button when the next control needs time to appear. If the user says the WatchLearn AI Browser is already open, never add open_browser, launch_app for WatchLearn AI Browser, or an unnecessary open_url before a button action; interact with the current page. If the user gives a duration such as "for 3 seconds," represent it with a wait action using duration_ms:3000. For websites and surveys, inspect the visible screen context before choosing controls, use the exact visible labels or content descriptions, scroll when needed, and verify each field after typing. For Prime Opinion or similar surveys, use only verified truthful user information, never invent answers or bypass screening, CAPTCHA, anti-bot, or security checks, and stop for the user when information is unknown or a protected step appears. Do not claim a survey was completed unless the final result is visibly shown.
 Do not claim that an action was completed. Actions are only proposed until the user approves them in the Android app.
@@ -1271,22 +1298,28 @@ private suspend fun requestChatGptPlan(
     description: String,
     reasoningEffort: String,
     reasoningMode: String,
-    phoneControlEnabled: Boolean
+    phoneControlEnabled: Boolean,
+    screenImageDataUrl: String? = null
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection)
     try {
+        val inputContent = JSONArray().put(
+            JSONObject()
+                .put("type", "input_text")
+                .put("text", description)
+        )
+        if (!screenImageDataUrl.isNullOrBlank()) {
+            inputContent.put(
+                JSONObject()
+                    .put("type", "input_image")
+                    .put("image_url", screenImageDataUrl)
+            )
+        }
         val input = JSONArray().put(
             JSONObject()
                 .put("type", "message")
                 .put("role", "user")
-                .put(
-                    "content",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("type", "input_text")
-                            .put("text", description)
-                    )
-                )
+                .put("content", inputContent)
         )
         val reasoning = JSONObject()
         if (!reasoningEffort.equals("Auto", ignoreCase = true)) {
@@ -1302,7 +1335,9 @@ private suspend fun requestChatGptPlan(
             .put(
                 "instructions",
                 "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
-                    "Do not claim you performed actions. Identify every step that needs user permission.\n" +
+                    "Do not claim you performed actions. Identify every step that needs user permission. " +
+                    "Use any supplied screenshot as the current visual state and use supplied accessibility controls as exact UI evidence. " +
+                    "Do not say a control was clicked unless the action list contains that action.\n" +
                     actionInstructions(phoneControlEnabled)
             )
             .put("input", input)
@@ -1378,7 +1413,8 @@ private suspend fun requestTaskPlan(
     model: String,
     description: String,
     reasoningEffort: String,
-    phoneControlEnabled: Boolean
+    phoneControlEnabled: Boolean,
+    screenImageDataUrl: String? = null
 ): String = withContext(Dispatchers.IO) {
     val connection = (URL(apiEndpoint(baseUrl, "/chat/completions")).openConnection() as HttpURLConnection)
     try {
@@ -1389,11 +1425,31 @@ private suspend fun requestTaskPlan(
                     .put(
                         "content",
                         "You are WatchLearn AI. Create a concise, safe action plan for this Android task. " +
-                            "Do not claim you performed actions. Identify every step that needs user permission.\n" +
+                            "Do not claim you performed actions. Identify every step that needs user permission. " +
+                            "Use any supplied screenshot as the current visual state and use supplied accessibility controls as exact UI evidence. " +
+                            "Do not say a control was clicked unless the action list contains that action.\n" +
                             actionInstructions(phoneControlEnabled)
                     )
             )
-            .put(JSONObject().put("role", "user").put("content", description))
+        val userMessage = JSONObject().put("role", "user")
+        if (screenImageDataUrl.isNullOrBlank()) {
+            userMessage.put("content", description)
+        } else {
+            userMessage.put(
+                "content",
+                JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", description))
+                    .put(
+                        JSONObject()
+                            .put("type", "image_url")
+                            .put(
+                                "image_url",
+                                JSONObject().put("url", screenImageDataUrl)
+                            )
+                    )
+            )
+        }
+        messages.put(userMessage)
         val payload = JSONObject()
             .put("model", model)
             .put("messages", messages)
