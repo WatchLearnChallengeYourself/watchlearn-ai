@@ -528,19 +528,19 @@ class MainActivity : ComponentActivity() {
             taskStatus = "Task ready to send to ChatGPT."
         }
 
-        val currentBrowserRequestHandler by rememberUpdatedState<(String, Boolean) -> Unit> {
+        val currentBrowserRequestHandler = rememberUpdatedState<(String, Boolean) -> Unit>(
             { text, append -> planBrowserTask(text, append) }
-        }
-        val currentBrowserApprovalHandler by rememberUpdatedState<(DevicePlan, Boolean) -> Unit> {
+        )
+        val currentBrowserApprovalHandler = rememberUpdatedState<(DevicePlan, Boolean) -> Unit>(
             { plan, append -> approveBrowserPlan(plan, append) }
-        }
+        )
         DisposableEffect(Unit) {
             BrowserTaskBridge.registerTaskHandlers(
                 requestHandler = { text, append ->
-                    currentBrowserRequestHandler(text, append)
+                    currentBrowserRequestHandler.value(text, append)
                 },
                 approvalHandler = { plan, append ->
-                    currentBrowserApprovalHandler(plan, append)
+                    currentBrowserApprovalHandler.value(plan, append)
                 }
             )
             onDispose { BrowserTaskBridge.clearTaskHandlers() }
