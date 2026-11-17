@@ -7,7 +7,6 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.webkit.CookieManager
-import android.webkit.DownloadListener
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -69,7 +68,7 @@ class InAppBrowserActivity : ComponentActivity() {
 
         addressBar = EditText(this).apply {
             hint = "Enter a website or search"
-            singleLine = true
+            setSingleLine(true)
             setSelectAllOnFocus(false)
             setOnEditorActionListener { _, _, _ ->
                 navigateFromAddressBar()
@@ -178,10 +177,9 @@ class InAppBrowserActivity : ComponentActivity() {
             }
         }
 
-        webView.setDownloadListener(
-            DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-                runCatching {
-                    val request = DownloadManager.Request(Uri.parse(url)).apply {
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            runCatching {
+                val request = DownloadManager.Request(Uri.parse(url)).apply {
                         setMimeType(mimeType)
                         setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType))
                         setDescription("Downloading from WatchLearn AI Browser")
@@ -200,9 +198,8 @@ class InAppBrowserActivity : ComponentActivity() {
                     val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
                     manager.enqueue(request)
                     Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
-                }.onFailure {
-                    Toast.makeText(this, "Download could not start", Toast.LENGTH_SHORT).show()
-                }
+            }.onFailure {
+                Toast.makeText(this, "Download could not start", Toast.LENGTH_SHORT).show()
             }
         }
 
