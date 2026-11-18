@@ -154,7 +154,7 @@ Never include password, payment, account deletion, message sending, or other sen
 """
 
 private const val PLAY_STORE_ACTION_INSTRUCTIONS = """
-Return a normal helpful response. This Play Store build does not have phone-control actions enabled and must not return launch_app, open_url, tap_text, tap_content_description, tap_view_id, tap, type_text, clear_text, swipe, back, home, recents, notifications, or wait actions.
+Return a normal helpful response. This Play Store build does not have phone-control actions enabled and must not return launch_app, open_browser, open_url, tap_text, tap_content_description, tap_view_id, tap, tap_any_video, type_text, clear_text, swipe, back, home, recents, notifications, or wait actions.
 """
 
 private fun actionInstructions(phoneControlEnabled: Boolean): String =
