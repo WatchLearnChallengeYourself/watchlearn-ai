@@ -10,6 +10,7 @@ object BrowserTaskBridge {
     private var planListener: ((DevicePlan, Boolean) -> Unit)? = null
     private var messageListener: ((String) -> Unit)? = null
     private var browserController: ((String) -> Boolean)? = null
+    private var browserUrlProvider: (() -> String?)? = null
 
     fun registerTaskHandlers(
         requestHandler: (String, Boolean) -> Unit,
@@ -37,7 +38,14 @@ object BrowserTaskBridge {
 
     fun clearBrowserController() {
         browserController = null
+        browserUrlProvider = null
     }
+
+    fun registerBrowserUrlProvider(provider: () -> String?) {
+        browserUrlProvider = provider
+    }
+
+    fun currentBrowserUrl(): String = browserUrlProvider?.invoke().orEmpty()
 
     fun reuseCurrentBrowser(requestedUrl: String): Boolean =
         browserController?.invoke(requestedUrl) == true
