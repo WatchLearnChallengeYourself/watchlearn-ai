@@ -96,6 +96,7 @@ fun describeDeviceAction(action: DeviceAction): String = when (action.type) {
     "tap_content_description" -> "Tap control described as “${action.text}”"
     "tap_view_id" -> "Tap view ${action.viewId}"
     "tap" -> "Tap screen at (${action.x ?: 0f}, ${action.y ?: 0f})"
+    "tap_any_video" -> "Tap a visible video"
     "type_text" -> "Type “${action.text}”"
     "clear_text" -> "Clear the selected text field"
     "swipe" -> "Swipe on the screen"
@@ -196,27 +197,217 @@ class WatchLearnAccessibilityService : AccessibilityService() {
     private fun continueExecution() {
         if (!running || paused) return
         if (nextActionIndex >= queuedActions.size) {
-            finish(true, "Approved phone actions completed.")
+            finish(true, "Approved phone actions completed and verified.")
             return
         }
         val action = queuedActions[nextActionIndex]
         actionStatus = "Doing: " + describeDeviceAction(action)
+        val beforeUiSignature = uiSignature()
         val generation = executionGeneration
         runActionWithRetry(action, 0, generation) { result ->
             if (!running) return@runActionWithRetry
             if (!result.first) {
-                finish(false, "${describeDeviceAction(action)} failed after waiting for the screen: ${result.second}")
+                finish(false, describeDeviceAction(action) + " failed while interacting with the screen: " + result.second)
                 return@runActionWithRetry
             }
-            nextActionIndex += 1
-            val delay = when (action.type) {
-                "launch_app", "open_app", "open_browser", "open_url", "back", "home", "recents", "notifications" -> 1_200L
-                "wait" -> action.durationMs.coerceIn(0L, 30_000L)
-                else -> 500L
+
+            val verifyDelay = when (action.type) {
+                "launch_app", "open_app", "open_browser", "open_url" -> 1_800L
+                "tap_text", "tap_content_description", "tap_view_id", "tap_any_video", "tap" -> 1_200L
+                "type_text", "clear_text", "swipe", "back", "home", "recents", "notifications" -> 800L
+                else -> 250L
             }
             handler.postDelayed({
-                if (generation == executionGeneration) continueExecution()
-            }, delay)
+                if (!running || generation != executionGeneration) return@postDelayed
+                val verification = verifyAction(action, beforeUiSignature)
+                if (!verification.first) {
+                    finish(
+                        false,
+                        describeDeviceAction(action) + " was not verified: " + verification.second
+                    )
+                    return@postDelayed
+                }
+
+                nextActionIndex += 1
+                val delay = when (action.type) {
+                    "launch_app", "open_app", "open_browser", "open_url", "back", "home", "recents", "notifications" -> 1_200L
+                    "wait" -> action.durationMs.coerceIn(0L, 30_000L)
+                    else -> 500L
+                }
+                handler.postDelayed({
+                    if (generation == executionGeneration) continueExecution()
+                }, delay)
+            }, verifyDelay)
+        }
+    }
+
+    private fun uiSignature(): String {
+        val root = rootInActiveWindow ?: return "no-active-window"
+        return root.packageName?.toString().orEmpty() + "|" + visibleUiContext().hashCode()
+    }
+
+    private fun currentPackageName(): String =
+        rootInActiveWindow?.packageName?.toString().orEmpty()
+
+    private fun normalizeHost(value: String): String =
+        Uri.parse(value).host.orEmpty().lowercase(Locale.US).removePrefix("www.")
+
+    private fun sameWebsite(first: String, second: String): Boolean {
+        val firstHost = normalizeHost(first)
+        val secondHost = normalizeHost(second)
+        if (firstHost.isBlank() || secondHost.isBlank()) return false
+        return firstHost == secondHost ||
+            firstHost.endsWith("." + secondHost) ||
+            secondHost.endsWith("." + firstHost)
+    }
+
+    private fun visibleLabelExists(value: String): Boolean {
+        val target = normalizeUiText(value)
+        val root = rootInActiveWindow ?: return false
+        return allNodes(root)
+            .asSequence()
+            .filter { it.isVisibleToUser && it.isEnabled }
+            .any { node ->
+                listOf(
+                    node.text?.toString().orEmpty(),
+                    node.contentDescription?.toString().orEmpty(),
+                    node.hintText?.toString().orEmpty()
+                ).any { normalizeUiText(it).contains(target) }
+            }
+    }
+
+    private fun verifyAction(
+        action: DeviceAction,
+        beforeUiSignature: String
+    ): Pair<Boolean, String> {
+        val afterUiSignature = uiSignature()
+        val changed = afterUiSignature != beforeUiSignature
+        return when (action.type) {
+            "launch_app", "open_app" -> {
+                val requested = action.packageName.ifBlank { action.text }
+                val expectedPackage = resolvePackage(requested)
+                if (expectedPackage.isNullOrBlank()) {
+                    false to "the requested app package could not be resolved"
+                } else if (currentPackageName().equals(expectedPackage, ignoreCase = true)) {
+                    true to "the requested app is visible"
+                } else {
+                    false to "the active screen is " + currentPackageName().ifBlank { "unknown" } +
+                        " instead of " + expectedPackage
+                }
+            }
+            "open_browser" -> {
+                if (!currentPackageName().equals("com.watchlearn.ai", ignoreCase = true)) {
+                    false to "WatchLearn AI Browser is not the active screen"
+                } else {
+                    val requestedUrl = action.url.ifBlank { action.text }.trim()
+                    val currentUrl = BrowserTaskBridge.currentBrowserUrl()
+                    if (requestedUrl.isBlank() || sameWebsite(requestedUrl, currentUrl)) {
+                        true to "WatchLearn AI Browser is visible"
+                    } else {
+                        false to "the browser is visible but its URL is " + currentUrl.ifBlank { "not available" }
+                    }
+                }
+            }
+            "open_url" -> {
+                val requestedPackage = action.packageName.trim()
+                val isWatchLearnBrowser =
+                    requestedPackage.isBlank() ||
+                        requestedPackage.equals("WatchLearn Browser", ignoreCase = true) ||
+                        requestedPackage.equals("WatchLearn AI Browser", ignoreCase = true) ||
+                        requestedPackage.equals("com.watchlearn.ai", ignoreCase = true)
+                if (isWatchLearnBrowser) {
+                    val currentUrl = BrowserTaskBridge.currentBrowserUrl()
+                    if (!currentPackageName().equals("com.watchlearn.ai", ignoreCase = true)) {
+                        false to "WatchLearn AI Browser is not the active screen"
+                    } else if (sameWebsite(action.url.ifBlank { action.text }, currentUrl)) {
+                        true to "the requested website is visible"
+                    } else {
+                        false to "the browser URL did not reach " + action.url.ifBlank { action.text }
+                    }
+                } else {
+                    val expectedPackage = resolvePackage(requestedPackage)
+                    if (!expectedPackage.isNullOrBlank() &&
+                        currentPackageName().equals(expectedPackage, ignoreCase = true)
+                    ) {
+                        true to "the requested app is visible"
+                    } else {
+                        false to "the requested app is not the active screen"
+                    }
+                }
+            }
+            "tap_text" -> {
+                if (changed || !visibleLabelExists(action.text)) {
+                    true to "the screen changed or the target disappeared"
+                } else {
+                    false to "the target label is still present and the screen did not change"
+                }
+            }
+            "tap_content_description" -> {
+                if (changed || !visibleLabelExists(action.text)) {
+                    true to "the screen changed or the target disappeared"
+                } else {
+                    false to "the target description is still present and the screen did not change"
+                }
+            }
+            "tap_view_id", "tap_any_video", "tap" -> {
+                if (changed) true to "the screen changed after the tap"
+                else false to "the screen did not change after the tap"
+            }
+            "type_text" -> {
+                if (changed || visibleLabelExists(action.text)) {
+                    true to "the screen reflects the typed text"
+                } else {
+                    false to "the typed text was not visible after input"
+                }
+            }
+            "clear_text", "swipe", "back", "home", "recents", "notifications" -> {
+                if (changed) true to "the screen changed"
+                else false to "the screen did not change"
+            }
+            "wait" -> true to "wait completed"
+            else -> true to "no additional visual verification is required"
+        }
+    }
+
+    private fun tapAnyVideo(): Pair<Boolean, String> {
+        val root = rootInActiveWindow ?: return false to "no active window is available"
+        val candidate = allNodes(root)
+            .asSequence()
+            .filter { it.isVisibleToUser && it.isEnabled && it.isClickable }
+            .mapNotNull { node ->
+                val label = listOf(
+                    node.text?.toString().orEmpty(),
+                    node.contentDescription?.toString().orEmpty(),
+                    node.hintText?.toString().orEmpty()
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+                val bounds = android.graphics.Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.width() < 120 || bounds.height() < 50 || bounds.top < 100) {
+                    null
+                } else {
+                    val normalized = normalizeUiText(label)
+                    val score =
+                        (if (normalized.contains("video")) 100 else 0) +
+                            (if (normalized.contains("watch")) 80 else 0) +
+                            (if (normalized.contains("play")) 70 else 0) +
+                            (if (normalized.contains("thumbnail")) 60 else 0) +
+                            (if (bounds.width() * bounds.height() > 40_000) 20 else 0)
+                    node to score
+                }
+            }
+            .sortedByDescending { it.second }
+            .firstOrNull()
+            ?.first
+            ?: return false to "no visible clickable video target was exposed by the current page"
+
+        val clicked = clickNode(candidate)
+        if (clicked.first) return clicked
+        val bounds = android.graphics.Rect()
+        candidate.getBoundsInScreen(bounds)
+        return if (bounds.width() > 0 && bounds.height() > 0) {
+            dispatchTap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+        } else {
+            false to "the video target had no usable screen bounds"
         }
     }
 
@@ -253,6 +444,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
             "tap_content_description",
             "tap_view_id",
             "tap",
+            "tap_any_video",
             "type_text",
             "clear_text",
             "swipe"
@@ -293,6 +485,7 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 val y = action.y ?: return false to "Tap action is missing y."
                 dispatchTap(x, y)
             }
+            "tap_any_video" -> tapAnyVideo()
             "type_text" -> typeText(action)
             "clear_text" -> clearText(action)
             "swipe" -> {
@@ -569,7 +762,12 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, 50L))
             .build()
-        return dispatchGesture(gesture, null, null) to "Tapped the screen."
+        val accepted = dispatchGesture(gesture, null, null)
+        return accepted to if (accepted) {
+            "Android accepted the tap gesture."
+        } else {
+            "Android rejected the tap gesture."
+        }
     }
 
     private fun dispatchSwipe(
@@ -592,7 +790,12 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 )
             )
             .build()
-        return dispatchGesture(gesture, null, null) to "Swiped the screen."
+        val accepted = dispatchGesture(gesture, null, null)
+        return accepted to if (accepted) {
+            "Android accepted the swipe gesture."
+        } else {
+            "Android rejected the swipe gesture."
+        }
     }
 
     private fun resolvePackage(identifier: String): String? {
