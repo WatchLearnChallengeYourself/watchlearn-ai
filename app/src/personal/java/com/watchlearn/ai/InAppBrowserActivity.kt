@@ -110,7 +110,11 @@ class InAppBrowserActivity : ComponentActivity() {
         }
         root.addView(progressBar, LinearLayout.LayoutParams(-1, 4))
 
-        webView = WebView(this)
+        webView = WebView(this).apply {
+            isFocusable = true
+            isFocusableInTouchMode = true
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
         val browserFrame = FrameLayout(this)
         browserFrame.addView(webView, FrameLayout.LayoutParams(-1, -1))
         browserFrame.addView(createTaskPanel(), taskPanelLayoutParams())
@@ -132,6 +136,7 @@ class InAppBrowserActivity : ComponentActivity() {
             runOnUiThread { keepCurrentBrowserPage(requestedUrl) }
             true
         }
+        BrowserTaskBridge.registerBrowserUrlProvider { webView.url }
 
         configureWebView()
 
