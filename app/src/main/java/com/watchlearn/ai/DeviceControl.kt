@@ -472,8 +472,12 @@ class WatchLearnAccessibilityService : AccessibilityService() {
                 val launchIntent = launchIntentForPackage(packageName)
                     ?: return false to "The app is installed but has no launchable activity: " + packageName
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(launchIntent)
-                true to "Opened " + packageName
+                runCatching {
+                    startActivity(launchIntent)
+                    true to "Requested launch of " + packageName
+                }.getOrElse {
+                    false to "Android could not launch " + packageName + ": " + (it.message ?: "unknown launch error")
+                }
             }
             "open_browser" -> openBrowser(action)
             "open_url" -> openUrl(action)
@@ -571,8 +575,12 @@ class WatchLearnAccessibilityService : AccessibilityService() {
         if (packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) == null) {
             return false to "No installed app can open $normalizedUrl${targetPackage?.let { " in $it" } ?: ""}."
         }
-        startActivity(intent)
-        return true to "Opened $normalizedUrl${targetPackage?.let { " in $it" } ?: ""}"
+        return runCatching {
+            startActivity(intent)
+            true to "Requested " + normalizedUrl + targetPackage?.let { " in " + it }.orEmpty()
+        }.getOrElse {
+            false to "Android could not open " + normalizedUrl + ": " + (it.message ?: "unknown launch error")
+        }
     }
 
     private fun tapText(text: String): Pair<Boolean, String> {
